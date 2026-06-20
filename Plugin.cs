@@ -54,7 +54,7 @@ namespace BloodSystem
 
             CfgEnabled   = Config.Bind("Blood", "Enabled",         true,   "Toggle all blood effects.");
             CfgLifetime  = Config.Bind("Blood", "Lifetime seconds", 30f,    "How long blood decals last.");
-            CfgRayCount  = Config.Bind("Blood", "Point stride",     2,      "Sample stride through image points (1=full, 2=half, 4=quarter resolution).");
+            CfgRayCount  = Config.Bind("Blood", "Rays per shot",    2000,   "Number of splatter rays. Higher = more resolution.");
             CfgConeAngle = Config.Bind("Blood", "Cone half-angle",  60f,    "Blood spread half-angle in degrees.");
             CfgDotSize   = Config.Bind("Blood", "Dot base radius",  0.015f, "Base dot radius in metres.");
             CfgDotGrow   = Config.Bind("Blood", "Dot grow per metre", 0.0005f, "Extra radius per metre of ray distance.");
@@ -214,31 +214,40 @@ namespace BloodSystem
                 go.SetActive(true);
             }
 
-            // ── Fog PS: slow, huge, wide — billowing blood cloud using splatter texture ─
+            // ── Fog PS: wide billowing cloud, fades out by ~0.6s ─────────────────────
             {
                 var go = new GameObject("BloodFogPS");
                 DontDestroyOnLoad(go);
                 go.SetActive(false);
                 _fogPS = go.AddComponent<ParticleSystem>();
                 var main = _fogPS.main;
-                main.startLifetime      = new ParticleSystem.MinMaxCurve(0.8f, 2.2f);
-                main.startSpeed         = new ParticleSystem.MinMaxCurve(0.2f, 2.0f);  // much slower
-                main.startSize          = new ParticleSystem.MinMaxCurve(0.08f, 0.40f); // much bigger, lots of variety
-                main.startRotation      = new ParticleSystem.MinMaxCurve(-Mathf.PI, Mathf.PI); // random start angle
-                main.maxParticles       = 500;
-                main.gravityModifier    = new ParticleSystem.MinMaxCurve(0.6f, 1.8f);  // varied gravity — further = falls faster
-                main.loop               = false;
-                main.playOnAwake        = false;
-                main.startColor         = new ParticleSystem.MinMaxGradient(_mustard);
+                main.startLifetime   = new ParticleSystem.MinMaxCurve(0.5f, 0.8f);   // short — all gone by ~0.8s
+                main.startSpeed      = new ParticleSystem.MinMaxCurve(1.5f, 5.0f);   // faster outward burst
+                main.startSize       = new ParticleSystem.MinMaxCurve(0.08f, 0.42f); // large + varied
+                main.startRotation   = new ParticleSystem.MinMaxCurve(-Mathf.PI, Mathf.PI);
+                main.maxParticles    = 500;
+                main.gravityModifier = new ParticleSystem.MinMaxCurve(0.1f, 0.45f);  // low — drifts outward, falls gently
+                main.loop            = false;
+                main.playOnAwake     = false;
+                main.startColor      = new ParticleSystem.MinMaxGradient(_mustard);
                 var sh = _fogPS.shape;
                 sh.enabled   = true;
                 sh.shapeType = ParticleSystemShapeType.Cone;
-                sh.angle     = 70f;    // very wide — outer ring
+                sh.angle     = 70f;
                 sh.radius    = 0.12f;
-                // Slow spin over lifetime gives organic tumbling look.
+                // Alpha fades 1→0 over lifetime so particles dissolve rather than pop out.
+                var col = _fogPS.colorOverLifetime;
+                col.enabled = true;
+                var grad = new Gradient();
+                grad.SetKeys(
+                    new GradientColorKey[] { new GradientColorKey(Color.white, 0f), new GradientColorKey(Color.white, 1f) },
+                    new GradientAlphaKey[] { new GradientAlphaKey(1f, 0f), new GradientAlphaKey(0f, 1f) }
+                );
+                col.color = new ParticleSystem.MinMaxGradient(grad);
+                // Slow spin for organic tumbling.
                 var rotOvLt = _fogPS.rotationOverLifetime;
                 rotOvLt.enabled = true;
-                rotOvLt.z       = new ParticleSystem.MinMaxCurve(-1.2f, 1.2f); // rad/s
+                rotOvLt.z       = new ParticleSystem.MinMaxCurve(-1.2f, 1.2f);
                 var psr = _fogPS.GetComponent<ParticleSystemRenderer>();
                 if (psr != null && !ReferenceEquals(_dotMat, null)) psr.material = _dotMat;
                 go.SetActive(true);
@@ -372,64 +381,64 @@ namespace BloodSystem
 
         // ── Spawn functions ───────────────────────────────────────────────────────
 
-        // Analytical projection: one center raycast finds wall plane, then all image CDF points
-        // project onto that plane analytically. No per-dot raycasts — allows half-image-resolution
-        // dot counts without per-frame raycast budget concerns.
+        // Per-ray CDF projection: fire N rays whose directions are drawn from the splatter image
+        // distribution. Dense image areas = more rays land there = matches blood texture pattern.
         internal static void SpawnProjection(Vector3 exitPt, Vector3 projDir, Sosig srcSosig)
         {
             if (!CfgEnabled.Value) return;
             try
             {
-                Color   col  = GetSosigBloodColor(srcSosig);
-                Vector3 fwd  = projDir.normalized;
-
-                // Ensure CDF/grid is populated.
                 if (ReferenceEquals(_splatterUVs, null) || _splatterUVs.Length == 0)
-                {
-                    Log.LogWarning("[BloodSystem] SpawnProjection: no sample data — building fallback grid.");
                     BuildFallbackGrid(200);
-                }
 
-                // Single center ray to locate wall.
-                RaycastHit wallHit;
-                if (!Physics.Raycast(exitPt, fwd, out wallHit, CfgRange.Value))
-                {
-                    Log.LogInfo("[BloodSystem] proj: center ray missed (no wall in range).");
-                    return;
-                }
-                if (IsSourceSosig(wallHit.collider, srcSosig)) { Log.LogInfo("[BloodSystem] proj: hit own sosig."); return; }
-                if (wallHit.collider.GetComponentInParent<SosigWeapon>() != null) return;
+                Color   col      = GetSosigBloodColor(srcSosig);
+                Vector3 fwd      = projDir.normalized;
+                float   tanHalf  = Mathf.Tan(CfgConeAngle.Value * Mathf.Deg2Rad);
+                float   range    = CfgRange.Value;
 
-                // Build wall tangent frame.
-                Vector3 wNorm  = wallHit.normal;
-                Vector3 qup    = Mathf.Abs(Vector3.Dot(wNorm, Vector3.up)) > 0.9f ? Vector3.forward : Vector3.up;
-                Vector3 wRight = Vector3.Cross(qup, wNorm).normalized;
-                Vector3 wUp    = Vector3.Cross(wNorm, wRight);
+                Vector3 worldUp = Mathf.Abs(Vector3.Dot(fwd, Vector3.up)) > 0.99f ? Vector3.forward : Vector3.up;
+                Vector3 right   = Vector3.Cross(worldUp, fwd).normalized;
+                Vector3 up      = Vector3.Cross(fwd, right);
 
-                // Stamp radius scales with cone angle + hit distance.
-                float stampR = Mathf.Max(0.1f, wallHit.distance * Mathf.Tan(CfgConeAngle.Value * Mathf.Deg2Rad));
-                float dotR   = CfgDotSize.Value;
-                Vector3 center = wallHit.point + wNorm * 0.008f; // offset to avoid z-fight
+                // stride through CDF so exactly N rays fire, distributed by image density
+                int N      = Mathf.Max(1, CfgRayCount.Value);
+                int stride = Mathf.Max(1, _splatterUVs.Length / N);
 
-                Rigidbody hitRb   = wallHit.collider.attachedRigidbody;
-                bool      onSosig = hitRb != null && hitRb.GetComponentInParent<SosigLink>() != null;
-                Transform par     = onSosig ? hitRb.transform : null;
+                var staticDots  = new List<DotData>(N);
+                var dynamicDots = new Dictionary<Transform, List<DotData>>();
 
-                int stride = Mathf.Max(1, CfgRayCount.Value);
-                var dots = new List<DotData>(_splatterUVs.Length / stride + 1);
                 for (int i = 0; i < _splatterUVs.Length; i += stride)
                 {
                     Vector2 uv  = _splatterUVs[i];
-                    Vector3 pos = center + wRight * (uv.x * stampR) + wUp * (uv.y * stampR);
-                    dots.Add(new DotData(pos, wNorm, dotR));
+                    Vector3 dir = (fwd + right * uv.x * tanHalf + up * uv.y * tanHalf).normalized;
+
+                    RaycastHit h;
+                    if (!Physics.Raycast(exitPt, dir, out h, range)) continue;
+                    if (IsSourceSosig(h.collider, srcSosig)) continue;
+                    if (h.collider.GetComponentInParent<SosigWeapon>() != null) continue;
+
+                    float dotR = CfgDotSize.Value + h.distance * CfgDotGrow.Value;
+
+                    Rigidbody hitRb   = h.collider.attachedRigidbody;
+                    bool      isSosig = hitRb != null && hitRb.GetComponentInParent<SosigLink>() != null;
+                    Transform par     = isSosig ? hitRb.transform : null;
+
+                    if (par == null)
+                        staticDots.Add(new DotData(h.point, h.normal, dotR));
+                    else
+                    {
+                        if (!dynamicDots.ContainsKey(par)) dynamicDots[par] = new List<DotData>();
+                        dynamicDots[par].Add(new DotData(h.point, h.normal, dotR));
+                    }
                 }
 
-                Log.LogInfo("[BloodSystem] proj " + dots.Count + " dots stampR=" + stampR.ToString("F2") + "m dist=" + wallHit.distance.ToString("F1") + "m shader=" + (GetMeshMat(col) != null ? GetMeshMat(col).shader.name : "NULL"));
-                BuildDotMesh(dots, par, col);
+                Log.LogInfo("[BloodSystem] proj N=" + N + " stride=" + stride + " static=" + staticDots.Count + " shader=" + (GetMeshMat(col) != null ? GetMeshMat(col).shader.name : "NULL"));
+                BuildDotMesh(staticDots, null, col);
+                foreach (var kv in dynamicDots) BuildDotMesh(kv.Value, kv.Key, col);
             }
             catch (System.Exception ex)
             {
-                Log.LogError("[BloodSystem] SpawnProjection exception: " + ex.Message + "\n" + ex.StackTrace);
+                Log.LogError("[BloodSystem] SpawnProjection exception: " + ex);
             }
         }
 
