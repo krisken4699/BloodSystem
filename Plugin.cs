@@ -35,7 +35,9 @@ namespace BloodSystem
 
         // Materials.
         internal static Material        _dotMat;   // particles: spray + drip (Sprites/Default + splatter PNG)
-        internal static Material        _meshMat;  // mesh decals (Particles/Alpha Blended + soft circle)
+        internal static Material        _meshMat;  // mesh decals base (Particles/Alpha Blended + soft circle)
+        // Per-color material cache: _TintColor carries blood color, avoids vertex color dependency.
+        static readonly Dictionary<Color, Material> _meshMatCache = new Dictionary<Color, Material>();
 
         // Spray PS.
         static ParticleSystem _sprayPS;
@@ -52,10 +54,10 @@ namespace BloodSystem
 
             CfgEnabled   = Config.Bind("Blood", "Enabled",           true,   "Toggle all blood effects.");
             CfgLifetime  = Config.Bind("Blood", "Lifetime seconds",   30f,    "How long blood decals last.");
-            CfgRayCount  = Config.Bind("Blood", "Rays per shot",      48,     "Splatter ray count (8-128).");
+            CfgRayCount  = Config.Bind("Blood", "Rays per shot",      400,    "Splatter ray count.");
             CfgConeAngle = Config.Bind("Blood", "Cone half-angle",    60f,    "Blood spread half-angle in degrees.");
-            CfgDotSize   = Config.Bind("Blood", "Dot base radius",    0.05f,  "Base dot radius in metres. 0.05 = 5cm.");
-            CfgDotGrow   = Config.Bind("Blood", "Dot grow per metre", 0.001f, "Extra radius per metre of ray distance.");
+            CfgDotSize   = Config.Bind("Blood", "Dot base radius",    0.015f, "Base dot radius in metres. 0.015 = 1.5cm.");
+            CfgDotGrow   = Config.Bind("Blood", "Dot grow per metre", 0.0005f,"Extra radius per metre of ray distance.");
             CfgRange     = Config.Bind("Blood", "Range metres",       50f,    "Max splatter distance.");
 
             // Load splatter PNG. Used for both particle material AND distribution pre-compute.
@@ -241,12 +243,30 @@ namespace BloodSystem
 
         // ── Mesh building ─────────────────────────────────────────────────────────
 
+        // Returns a cached Material with _TintColor = col * 0.5 (counters 2x multiply in shader).
+        // Bypasses vertex color — Unity 5.6 MeshRenderer vertex colors unreliable with particle shaders.
+        static Material GetMeshMat(Color col)
+        {
+            if (ReferenceEquals(_meshMat, null)) return null;
+            Material m;
+            if (!_meshMatCache.TryGetValue(col, out m) || ReferenceEquals(m, null))
+            {
+                m = new Material(_meshMat);
+                if (m.HasProperty("_TintColor"))
+                    m.SetColor("_TintColor", new Color(col.r * 0.5f, col.g * 0.5f, col.b * 0.5f, 1f));
+                else if (m.HasProperty("_Color"))
+                    m.SetColor("_Color", col);
+                _meshMatCache[col] = m;
+            }
+            return m;
+        }
+
         // Batches all hit-point dots into one merged mesh per parent.
-        // col is baked into vertex colors so the blood color tints the soft-circle texture.
         static void BuildDotMesh(List<DotData> dots, Transform parent, Color col)
         {
             if (dots.Count == 0) return;
-            if (ReferenceEquals(_meshMat, null)) return;
+            Material mat = GetMeshMat(col);
+            if (ReferenceEquals(mat, null)) return;
             const int MAX = 16383; // 4 verts × 16383 = 65532 < 65535
             int total = dots.Count;
             for (int start = 0; start < total; start += MAX)
@@ -254,7 +274,6 @@ namespace BloodSystem
                 int count = Mathf.Min(MAX, total - start);
                 var verts = new Vector3[count * 4];
                 var uvs   = new Vector2[count * 4];
-                var cols  = new Color  [count * 4];
                 var tris  = new int    [count * 6];
 
                 for (int i = 0; i < count; i++)
@@ -283,7 +302,6 @@ namespace BloodSystem
                     verts[v]=c0; verts[v+1]=c1; verts[v+2]=c2; verts[v+3]=c3;
                     uvs[v]=new Vector2(0,0); uvs[v+1]=new Vector2(1,0);
                     uvs[v+2]=new Vector2(1,1); uvs[v+3]=new Vector2(0,1);
-                    cols[v]=cols[v+1]=cols[v+2]=cols[v+3]=col;
                     int t = i * 6;
                     tris[t]=v; tris[t+1]=v+1; tris[t+2]=v+2;
                     tris[t+3]=v; tris[t+4]=v+2; tris[t+5]=v+3;
@@ -292,7 +310,6 @@ namespace BloodSystem
                 var mesh = new Mesh();
                 mesh.vertices  = verts;
                 mesh.uv        = uvs;
-                mesh.colors    = cols;
                 mesh.triangles = tris;
                 mesh.RecalculateBounds();
 
@@ -300,7 +317,7 @@ namespace BloodSystem
                 if (parent != null) go.transform.SetParent(parent, false);
                 go.AddComponent<MeshFilter>().mesh = mesh;
                 var mr = go.AddComponent<MeshRenderer>();
-                mr.material          = _meshMat;
+                mr.material          = mat;
                 mr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
                 mr.receiveShadows    = false;
                 UnityEngine.Object.Destroy(go, CfgLifetime.Value);
@@ -406,7 +423,8 @@ namespace BloodSystem
 
         internal static void SpawnDripStain(Vector3 pos, Vector3 normal, Color col, float scale = 1f)
         {
-            if (ReferenceEquals(_meshMat, null)) return;
+            Material mat = GetMeshMat(col);
+            if (ReferenceEquals(mat, null)) return;
             float r = UnityEngine.Random.Range(0.02f, 0.055f) * scale;
             Vector3 qup = Mathf.Abs(Vector3.Dot(normal, Vector3.up)) > 0.9f
                 ? Vector3.forward : Vector3.up;
@@ -427,7 +445,7 @@ namespace BloodSystem
             var go = new GameObject("DX");
             go.AddComponent<MeshFilter>().mesh = mesh;
             var mr = go.AddComponent<MeshRenderer>();
-            mr.material          = _meshMat;
+            mr.material          = mat;
             mr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
             mr.receiveShadows    = false;
             UnityEngine.Object.Destroy(go, CfgLifetime.Value);
