@@ -52,11 +52,11 @@ namespace BloodSystem
 
             CfgEnabled   = Config.Bind("Blood", "Enabled",           true,   "Toggle all blood effects.");
             CfgLifetime  = Config.Bind("Blood", "Lifetime seconds",   30f,    "How long blood decals last.");
-            CfgRayCount  = Config.Bind("Blood", "Rays per shot",      600,    "Splatter ray count. Higher = sharper image reproduction.");
-            CfgConeAngle = Config.Bind("Blood", "Cone half-angle",    30f,    "Blood spread half-angle in degrees.");
-            CfgDotSize   = Config.Bind("Blood", "Dot base radius",    0.005f, "Base dot radius in metres. 0.005 = 5mm.");
+            CfgRayCount  = Config.Bind("Blood", "Rays per shot",      48,     "Splatter ray count (8-128).");
+            CfgConeAngle = Config.Bind("Blood", "Cone half-angle",    60f,    "Blood spread half-angle in degrees.");
+            CfgDotSize   = Config.Bind("Blood", "Dot base radius",    0.05f,  "Base dot radius in metres. 0.05 = 5cm.");
             CfgDotGrow   = Config.Bind("Blood", "Dot grow per metre", 0.001f, "Extra radius per metre of ray distance.");
-            CfgRange     = Config.Bind("Blood", "Range metres",       10f,    "Max splatter distance.");
+            CfgRange     = Config.Bind("Blood", "Range metres",       50f,    "Max splatter distance.");
 
             // Load splatter PNG. Used for both particle material AND distribution pre-compute.
             Texture2D splatTex = LoadFirstPng();
