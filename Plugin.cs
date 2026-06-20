@@ -420,8 +420,9 @@ namespace BloodSystem
                     Vector2 uv  = _splatterUVs[i];
                     Vector3 dir = (fwd + right * uv.x * tanHalf + up * uv.y * tanHalf).normalized;
 
+                    // Offset 0.15m along ray so origin clears sosig body surface.
                     RaycastHit h;
-                    if (!Physics.Raycast(exitPt, dir, out h, range)) continue;
+                    if (!Physics.Raycast(exitPt + dir * 0.15f, dir, out h, range)) continue;
                     if (IsSourceSosig(h.collider, srcSosig)) continue;
                     if (h.collider.GetComponentInParent<SosigWeapon>() != null) continue;
 
@@ -575,6 +576,48 @@ namespace BloodSystem
                 SpawnDripStain(h.point, h.normal, col, 1.8f);
             }
         }
+
+        // 360° fog burst for segment explosions. Sphere emitter = all directions equally.
+        internal static void SpawnExplosionFog(Vector3 pos, Color col)
+        {
+            if (!CfgEnabled.Value) return;
+            var go = new GameObject("BloodExplFog");
+            go.transform.position = pos;
+            var ps   = go.AddComponent<ParticleSystem>();
+            var mn   = ps.main;
+            mn.startLifetime   = new ParticleSystem.MinMaxCurve(0.4f, 0.8f);
+            mn.startSpeed      = new ParticleSystem.MinMaxCurve(1.5f, 5.5f);
+            mn.startSize       = new ParticleSystem.MinMaxCurve(0.08f, 0.42f);
+            mn.startRotation   = new ParticleSystem.MinMaxCurve(-Mathf.PI, Mathf.PI);
+            mn.gravityModifier = new ParticleSystem.MinMaxCurve(0.1f, 0.45f);
+            mn.loop            = false;
+            mn.playOnAwake     = false;
+            mn.startColor      = new ParticleSystem.MinMaxGradient(new Color(col.r, col.g, col.b, 0.65f));
+            // Sphere = true 360° omnidirectional burst.
+            var sh = ps.shape;
+            sh.enabled   = true;
+            sh.shapeType = ParticleSystemShapeType.Sphere;
+            sh.radius    = 0.15f;
+            // Fade alpha 1→0 over lifetime.
+            var colOvLt = ps.colorOverLifetime;
+            colOvLt.enabled = true;
+            var grad = new Gradient();
+            grad.SetKeys(
+                new GradientColorKey[] { new GradientColorKey(Color.white, 0f), new GradientColorKey(Color.white, 1f) },
+                new GradientAlphaKey[] { new GradientAlphaKey(1f, 0f), new GradientAlphaKey(0f, 1f) }
+            );
+            colOvLt.color = new ParticleSystem.MinMaxGradient(grad);
+            var rotOvLt = ps.rotationOverLifetime;
+            rotOvLt.enabled = true;
+            rotOvLt.z = new ParticleSystem.MinMaxCurve(-1.2f, 1.2f);
+            var psr = ps.GetComponent<ParticleSystemRenderer>();
+            if (!ReferenceEquals(_dotMat, null)) psr.material = _dotMat;
+            var stainer = go.AddComponent<BloodDripStainer>();
+            stainer.BloodColor = col;
+            ps.Play();
+            ps.Emit(100);
+            UnityEngine.Object.Destroy(go, 3f);
+        }
     }
 
     public class BloodDripStainer : MonoBehaviour
@@ -711,7 +754,7 @@ namespace BloodSystem
                     }
 
                 BloodSystemPlugin.SpawnExplosionSplatter(bPos, expSosig);
-                BloodSystemPlugin.SpawnBloodSpray(bPos, bDir, expCol);
+                BloodSystemPlugin.SpawnExplosionFog(bPos, expCol); // 360° fog on segment pop
             }
 
             if (ReferenceEquals(currentCollider, tracker.PrevCollider)) return;
