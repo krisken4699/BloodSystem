@@ -1,0 +1,9 @@
+{
+    "name": "Blood_System",
+    "version_number": "1.0.0",
+    "website_url": "",
+    "description": "Wall blood splatter when bullets exit sosigs. Detects actual bullet penetration — no faking it with damage values.",
+    "dependencies": [
+        "BepInEx-BepInExPack_H3VR-5.4.1700"
+    ]
+}
