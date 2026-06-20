@@ -214,26 +214,31 @@ namespace BloodSystem
                 go.SetActive(true);
             }
 
-            // ── Fog PS: slow, large, wide — poofy blood mist using splatter texture ──
+            // ── Fog PS: slow, huge, wide — billowing blood cloud using splatter texture ─
             {
                 var go = new GameObject("BloodFogPS");
                 DontDestroyOnLoad(go);
                 go.SetActive(false);
                 _fogPS = go.AddComponent<ParticleSystem>();
                 var main = _fogPS.main;
-                main.startLifetime   = new ParticleSystem.MinMaxCurve(0.6f, 1.4f);
-                main.startSpeed      = new ParticleSystem.MinMaxCurve(0.5f, 4f);
-                main.startSize       = new ParticleSystem.MinMaxCurve(0.04f, 0.14f);
-                main.maxParticles    = 1000;
-                main.gravityModifier = 0.25f;  // floats
-                main.loop            = false;
-                main.playOnAwake     = false;
-                main.startColor      = new ParticleSystem.MinMaxGradient(_mustard);
+                main.startLifetime      = new ParticleSystem.MinMaxCurve(0.8f, 2.2f);
+                main.startSpeed         = new ParticleSystem.MinMaxCurve(0.2f, 2.0f);  // much slower
+                main.startSize          = new ParticleSystem.MinMaxCurve(0.08f, 0.40f); // much bigger, lots of variety
+                main.startRotation      = new ParticleSystem.MinMaxCurve(-Mathf.PI, Mathf.PI); // random start angle
+                main.maxParticles       = 500;
+                main.gravityModifier    = new ParticleSystem.MinMaxCurve(0.6f, 1.8f);  // varied gravity — further = falls faster
+                main.loop               = false;
+                main.playOnAwake        = false;
+                main.startColor         = new ParticleSystem.MinMaxGradient(_mustard);
                 var sh = _fogPS.shape;
                 sh.enabled   = true;
                 sh.shapeType = ParticleSystemShapeType.Cone;
-                sh.angle     = 55f;   // much wider — second, outer ring
-                sh.radius    = 0.08f;
+                sh.angle     = 70f;    // very wide — outer ring
+                sh.radius    = 0.12f;
+                // Slow spin over lifetime gives organic tumbling look.
+                var rotOvLt = _fogPS.rotationOverLifetime;
+                rotOvLt.enabled = true;
+                rotOvLt.z       = new ParticleSystem.MinMaxCurve(-1.2f, 1.2f); // rad/s
                 var psr = _fogPS.GetComponent<ParticleSystemRenderer>();
                 if (psr != null && !ReferenceEquals(_dotMat, null)) psr.material = _dotMat;
                 go.SetActive(true);
@@ -274,23 +279,29 @@ namespace BloodSystem
 
         // ── Mesh building ─────────────────────────────────────────────────────────
 
-        // Returns a cached decal Material with blood color baked into the soft-circle texture.
-        // Tries Alloy/Decal first (H3VR's PBR stack), falls back to standard transparent shaders.
         static Material GetMeshMat(Color col)
         {
             Material m;
             if (!_meshMatCache.TryGetValue(col, out m) || ReferenceEquals(m, null))
             {
+                // Try every transparent shader. Sprites/Default is guaranteed present
+                // (it's what _dotMat uses). Last resort: clone _dotMat's shader directly.
                 Shader sh = Shader.Find("Alloy/Decal");
                 if (ReferenceEquals(sh, null)) sh = Shader.Find("Unlit/Transparent");
                 if (ReferenceEquals(sh, null)) sh = Shader.Find("Particles/Alpha Blended");
                 if (ReferenceEquals(sh, null)) sh = Shader.Find("Transparent/Diffuse");
-                if (ReferenceEquals(sh, null)) { _meshMatCache[col] = null; return null; }
+                if (ReferenceEquals(sh, null)) sh = Shader.Find("Sprites/Default");
+                if (ReferenceEquals(sh, null) && !ReferenceEquals(_dotMat, null)) sh = _dotMat.shader;
+                if (ReferenceEquals(sh, null))
+                {
+                    Log.LogError("[BloodSystem] GetMeshMat: no usable shader — decals disabled.");
+                    _meshMatCache[col] = null; return null;
+                }
                 m = new Material(sh);
                 m.mainTexture = MakeColoredSoftCircle(64, col);
                 if (m.HasProperty("_TintColor"))
                     m.SetColor("_TintColor", new Color(0.5f, 0.5f, 0.5f, 1f));
-                Log.LogInfo("[BloodSystem] decalShader=" + sh.name);
+                Log.LogInfo("[BloodSystem] decalShader=" + sh.name + " col=" + col);
                 _meshMatCache[col] = m;
             }
             return m;
@@ -367,44 +378,59 @@ namespace BloodSystem
         internal static void SpawnProjection(Vector3 exitPt, Vector3 projDir, Sosig srcSosig)
         {
             if (!CfgEnabled.Value) return;
-
-            Color   col  = GetSosigBloodColor(srcSosig);
-            Vector3 fwd  = projDir.normalized;
-
-            // Single center ray to locate wall.
-            RaycastHit wallHit;
-            if (!Physics.Raycast(exitPt, fwd, out wallHit, CfgRange.Value)) return;
-            if (IsSourceSosig(wallHit.collider, srcSosig)) return;
-            if (wallHit.collider.GetComponentInParent<SosigWeapon>() != null) return;
-
-            // Build wall tangent frame.
-            Vector3 wNorm  = wallHit.normal;
-            Vector3 qup    = Mathf.Abs(Vector3.Dot(wNorm, Vector3.up)) > 0.9f ? Vector3.forward : Vector3.up;
-            Vector3 wRight = Vector3.Cross(qup, wNorm).normalized;
-            Vector3 wUp    = Vector3.Cross(wNorm, wRight);
-
-            // Stamp radius: cone spread at hit distance.
-            float stampR = wallHit.distance * Mathf.Tan(CfgConeAngle.Value * Mathf.Deg2Rad);
-            float dotR   = CfgDotSize.Value;
-            // Offset slightly off the wall to avoid z-fight.
-            Vector3 center = wallHit.point + wNorm * 0.003f;
-
-            Rigidbody hitRb  = wallHit.collider.attachedRigidbody;
-            bool      onSosig = hitRb != null && hitRb.GetComponentInParent<SosigLink>() != null;
-            Transform par    = onSosig ? hitRb.transform : null;
-
-            // Walk CDF array at configured stride (2 = half-image resolution).
-            int stride = Mathf.Max(1, CfgRayCount.Value);
-            var dots = new List<DotData>(_splatterUVs.Length / stride + 1);
-            for (int i = 0; i < _splatterUVs.Length; i += stride)
+            try
             {
-                Vector2 uv  = _splatterUVs[i];
-                Vector3 pos = center + wRight * (uv.x * stampR) + wUp * (uv.y * stampR);
-                dots.Add(new DotData(pos, wNorm, dotR));
-            }
+                Color   col  = GetSosigBloodColor(srcSosig);
+                Vector3 fwd  = projDir.normalized;
 
-            BuildDotMesh(dots, par, col);
-            Log.LogInfo("[BloodSystem] proj " + dots.Count + " dots stampR=" + stampR.ToString("F2") + "m");
+                // Ensure CDF/grid is populated.
+                if (ReferenceEquals(_splatterUVs, null) || _splatterUVs.Length == 0)
+                {
+                    Log.LogWarning("[BloodSystem] SpawnProjection: no sample data — building fallback grid.");
+                    BuildFallbackGrid(200);
+                }
+
+                // Single center ray to locate wall.
+                RaycastHit wallHit;
+                if (!Physics.Raycast(exitPt, fwd, out wallHit, CfgRange.Value))
+                {
+                    Log.LogInfo("[BloodSystem] proj: center ray missed (no wall in range).");
+                    return;
+                }
+                if (IsSourceSosig(wallHit.collider, srcSosig)) { Log.LogInfo("[BloodSystem] proj: hit own sosig."); return; }
+                if (wallHit.collider.GetComponentInParent<SosigWeapon>() != null) return;
+
+                // Build wall tangent frame.
+                Vector3 wNorm  = wallHit.normal;
+                Vector3 qup    = Mathf.Abs(Vector3.Dot(wNorm, Vector3.up)) > 0.9f ? Vector3.forward : Vector3.up;
+                Vector3 wRight = Vector3.Cross(qup, wNorm).normalized;
+                Vector3 wUp    = Vector3.Cross(wNorm, wRight);
+
+                // Stamp radius scales with cone angle + hit distance.
+                float stampR = Mathf.Max(0.1f, wallHit.distance * Mathf.Tan(CfgConeAngle.Value * Mathf.Deg2Rad));
+                float dotR   = CfgDotSize.Value;
+                Vector3 center = wallHit.point + wNorm * 0.008f; // offset to avoid z-fight
+
+                Rigidbody hitRb   = wallHit.collider.attachedRigidbody;
+                bool      onSosig = hitRb != null && hitRb.GetComponentInParent<SosigLink>() != null;
+                Transform par     = onSosig ? hitRb.transform : null;
+
+                int stride = Mathf.Max(1, CfgRayCount.Value);
+                var dots = new List<DotData>(_splatterUVs.Length / stride + 1);
+                for (int i = 0; i < _splatterUVs.Length; i += stride)
+                {
+                    Vector2 uv  = _splatterUVs[i];
+                    Vector3 pos = center + wRight * (uv.x * stampR) + wUp * (uv.y * stampR);
+                    dots.Add(new DotData(pos, wNorm, dotR));
+                }
+
+                Log.LogInfo("[BloodSystem] proj " + dots.Count + " dots stampR=" + stampR.ToString("F2") + "m dist=" + wallHit.distance.ToString("F1") + "m shader=" + (GetMeshMat(col) != null ? GetMeshMat(col).shader.name : "NULL"));
+                BuildDotMesh(dots, par, col);
+            }
+            catch (System.Exception ex)
+            {
+                Log.LogError("[BloodSystem] SpawnProjection exception: " + ex.Message + "\n" + ex.StackTrace);
+            }
         }
 
         internal static void SpawnBloodSpray(Vector3 pos, Vector3 fwd, Color col)
@@ -412,24 +438,25 @@ namespace BloodSystem
             if (!CfgEnabled.Value) return;
             Quaternion rot = Quaternion.LookRotation(fwd);
 
-            // Pellets: fast, tight first ring.
+            // Pellets: fast, tight inner ring of individual blood drops.
             if (!ReferenceEquals(_pelletPS, null))
             {
-                _pelletPS.gameObject.transform.SetPositionAndRotation(pos, rot);
+                _pelletPS.gameObject.transform.position = pos;
+                _pelletPS.gameObject.transform.rotation = rot;
                 var m = _pelletPS.main;
                 m.startColor = new ParticleSystem.MinMaxGradient(col);
-                _pelletPS.Emit(600);
+                _pelletPS.Emit(700);
             }
 
-            // Fog: slow, wide second ring, uses splatter texture per particle.
+            // Fog: slow billowing outer cloud. Semi-transparent, splatter texture per particle.
             if (!ReferenceEquals(_fogPS, null))
             {
-                _fogPS.gameObject.transform.SetPositionAndRotation(pos, rot);
+                _fogPS.gameObject.transform.position = pos;
+                _fogPS.gameObject.transform.rotation = rot;
                 var m = _fogPS.main;
-                // Slightly transparent so fog particles don't fully occlude wall.
-                Color fogCol = new Color(col.r, col.g, col.b, 0.55f);
+                Color fogCol = new Color(col.r, col.g, col.b, 0.6f);
                 m.startColor = new ParticleSystem.MinMaxGradient(fogCol);
-                _fogPS.Emit(120);
+                _fogPS.Emit(50);
             }
         }
 
