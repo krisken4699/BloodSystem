@@ -34,9 +34,8 @@ namespace BloodSystem
         internal static readonly Color _mustard = new Color(0.9f, 0.8f, 0f, 1f);
 
         // Materials.
-        internal static Material        _dotMat;   // particles: spray + drip (Sprites/Default + splatter PNG)
-        internal static Material        _meshMat;  // mesh decals base (Particles/Alpha Blended + soft circle)
-        // Per-color material cache: _TintColor carries blood color, avoids vertex color dependency.
+        internal static Material        _dotMat;   // particles: spray + drip
+        // Per-color mesh decal materials: blood color baked into texture, no vertex color dependency.
         static readonly Dictionary<Color, Material> _meshMatCache = new Dictionary<Color, Material>();
 
         // Spray PS.
@@ -52,13 +51,13 @@ namespace BloodSystem
             Log       = Logger;
             _instance = this;
 
-            CfgEnabled   = Config.Bind("Blood", "Enabled",           true,   "Toggle all blood effects.");
-            CfgLifetime  = Config.Bind("Blood", "Lifetime seconds",   30f,    "How long blood decals last.");
-            CfgRayCount  = Config.Bind("Blood", "Rays per shot",      400,    "Splatter ray count.");
-            CfgConeAngle = Config.Bind("Blood", "Cone half-angle",    60f,    "Blood spread half-angle in degrees.");
-            CfgDotSize   = Config.Bind("Blood", "Dot base radius",    0.015f, "Base dot radius in metres. 0.015 = 1.5cm.");
-            CfgDotGrow   = Config.Bind("Blood", "Dot grow per metre", 0.0005f,"Extra radius per metre of ray distance.");
-            CfgRange     = Config.Bind("Blood", "Range metres",       50f,    "Max splatter distance.");
+            CfgEnabled   = Config.Bind("Blood", "Enabled",         true,   "Toggle all blood effects.");
+            CfgLifetime  = Config.Bind("Blood", "Lifetime seconds", 30f,    "How long blood decals last.");
+            CfgRayCount  = Config.Bind("Blood", "Point stride",     2,      "Sample stride through image points (1=full, 2=half, 4=quarter resolution).");
+            CfgConeAngle = Config.Bind("Blood", "Cone half-angle",  60f,    "Blood spread half-angle in degrees.");
+            CfgDotSize   = Config.Bind("Blood", "Dot base radius",  0.015f, "Base dot radius in metres.");
+            CfgDotGrow   = Config.Bind("Blood", "Dot grow per metre", 0.0005f, "Extra radius per metre of ray distance.");
+            CfgRange     = Config.Bind("Blood", "Range metres",     50f,    "Max splatter distance.");
 
             // Load splatter PNG. Used for both particle material AND distribution pre-compute.
             Texture2D splatTex = LoadFirstPng();
@@ -78,23 +77,6 @@ namespace BloodSystem
                 _dotMat = new Material(spriteShader);
                 if (!ReferenceEquals(splatTex, null)) _dotMat.mainTexture = splatTex;
             }
-
-            // Mesh decal material: soft gaussian circle texture, vertex colors carry blood tint.
-            // Particles/Alpha Blended reads vertex COLOR semantic — tints by blood color per shot.
-            Shader meshShader = Shader.Find("Particles/Alpha Blended");
-            if (ReferenceEquals(meshShader, null)) meshShader = Shader.Find("Unlit/Transparent");
-            if (ReferenceEquals(meshShader, null)) meshShader = Shader.Find("Transparent/Diffuse");
-            if (ReferenceEquals(meshShader, null)) meshShader = Shader.Find("Unlit/Color");
-            if (!ReferenceEquals(meshShader, null))
-            {
-                _meshMat = new Material(meshShader);
-                _meshMat.mainTexture = MakeSoftCircle(64);
-                // Neutralise the built-in 2x multiply in Particles/Alpha Blended.
-                if (_meshMat.HasProperty("_TintColor"))
-                    _meshMat.SetColor("_TintColor", new Color(0.5f, 0.5f, 0.5f, 1f));
-                Log.LogInfo("[BloodSystem] meshMat=" + meshShader.name);
-            }
-            else Log.LogWarning("[BloodSystem] no mesh shader — stains disabled.");
 
             BuildSprayPS();
             new Harmony("h3vr.invent60.bloodsystem").PatchAll(typeof(BloodSystemPatches));
@@ -166,8 +148,9 @@ namespace BloodSystem
             return _splatterUVs[lo];
         }
 
-        // Procedural soft gaussian circle: white RGB, gaussian alpha falloff to edge.
-        static Texture2D MakeSoftCircle(int size)
+        // Soft gaussian circle with blood color baked into RGB. Alpha = gaussian falloff.
+        // Baking color avoids any dependency on vertex colors or _TintColor shader properties.
+        static Texture2D MakeColoredSoftCircle(int size, Color col)
         {
             var tex = new Texture2D(size, size, TextureFormat.RGBA32, false);
             float c   = (size - 1) * 0.5f;
@@ -177,7 +160,7 @@ namespace BloodSystem
             {
                 float dx = (x - c) / c, dy = (y - c) / c;
                 float a  = Mathf.Clamp01(Mathf.Exp(-(dx*dx + dy*dy) * 2.5f));
-                pix[y * size + x] = new Color(1f, 1f, 1f, a);
+                pix[y * size + x] = new Color(col.r, col.g, col.b, a);
             }
             tex.SetPixels(pix);
             tex.Apply();
@@ -243,19 +226,23 @@ namespace BloodSystem
 
         // ── Mesh building ─────────────────────────────────────────────────────────
 
-        // Returns a cached Material with _TintColor = col * 0.5 (counters 2x multiply in shader).
-        // Bypasses vertex color — Unity 5.6 MeshRenderer vertex colors unreliable with particle shaders.
+        // Returns a cached decal Material with blood color baked into the soft-circle texture.
+        // Tries Alloy/Decal first (H3VR's PBR stack), falls back to standard transparent shaders.
         static Material GetMeshMat(Color col)
         {
-            if (ReferenceEquals(_meshMat, null)) return null;
             Material m;
             if (!_meshMatCache.TryGetValue(col, out m) || ReferenceEquals(m, null))
             {
-                m = new Material(_meshMat);
+                Shader sh = Shader.Find("Alloy/Decal");
+                if (ReferenceEquals(sh, null)) sh = Shader.Find("Unlit/Transparent");
+                if (ReferenceEquals(sh, null)) sh = Shader.Find("Particles/Alpha Blended");
+                if (ReferenceEquals(sh, null)) sh = Shader.Find("Transparent/Diffuse");
+                if (ReferenceEquals(sh, null)) { _meshMatCache[col] = null; return null; }
+                m = new Material(sh);
+                m.mainTexture = MakeColoredSoftCircle(64, col);
                 if (m.HasProperty("_TintColor"))
-                    m.SetColor("_TintColor", new Color(col.r * 0.5f, col.g * 0.5f, col.b * 0.5f, 1f));
-                else if (m.HasProperty("_Color"))
-                    m.SetColor("_Color", col);
+                    m.SetColor("_TintColor", new Color(0.5f, 0.5f, 0.5f, 1f));
+                Log.LogInfo("[BloodSystem] decalShader=" + sh.name);
                 _meshMatCache[col] = m;
             }
             return m;
@@ -326,57 +313,51 @@ namespace BloodSystem
 
         // ── Spawn functions ───────────────────────────────────────────────────────
 
-        // Fires N rays whose directions are drawn from the splatter PNG distribution.
-        // More rays land where the image is darker/denser.
+        // Analytical projection: one center raycast finds wall plane, then all image CDF points
+        // project onto that plane analytically. No per-dot raycasts — allows half-image-resolution
+        // dot counts without per-frame raycast budget concerns.
         internal static void SpawnProjection(Vector3 exitPt, Vector3 projDir, Sosig srcSosig)
         {
             if (!CfgEnabled.Value) return;
-            if (ReferenceEquals(_meshMat, null)) return;
+            if (_splatterUVs == null || _splatterUVs.Length == 0) return;
 
-            Color col     = GetSosigBloodColor(srcSosig);
-            int   N       = CfgRayCount.Value;
-            float tanHalf = Mathf.Tan(CfgConeAngle.Value * Mathf.Deg2Rad);
-            float range   = CfgRange.Value;
+            Color   col  = GetSosigBloodColor(srcSosig);
+            Vector3 fwd  = projDir.normalized;
 
-            Vector3 fwd     = projDir.normalized;
-            Vector3 worldUp = Mathf.Abs(Vector3.Dot(fwd, Vector3.up)) > 0.99f ? Vector3.forward : Vector3.up;
-            Vector3 right   = Vector3.Cross(worldUp, fwd).normalized;
-            Vector3 up      = Vector3.Cross(fwd, right);
+            // Single center ray to locate wall.
+            RaycastHit wallHit;
+            if (!Physics.Raycast(exitPt, fwd, out wallHit, CfgRange.Value)) return;
+            if (IsSourceSosig(wallHit.collider, srcSosig)) return;
+            if (wallHit.collider.GetComponentInParent<SosigWeapon>() != null) return;
 
-            var staticDots  = new List<DotData>();
-            var dynamicDots = new Dictionary<Transform, List<DotData>>();
+            // Build wall tangent frame.
+            Vector3 wNorm  = wallHit.normal;
+            Vector3 qup    = Mathf.Abs(Vector3.Dot(wNorm, Vector3.up)) > 0.9f ? Vector3.forward : Vector3.up;
+            Vector3 wRight = Vector3.Cross(qup, wNorm).normalized;
+            Vector3 wUp    = Vector3.Cross(wNorm, wRight);
 
-            for (int i = 0; i < N; i++)
+            // Stamp radius: cone spread at hit distance.
+            float stampR = wallHit.distance * Mathf.Tan(CfgConeAngle.Value * Mathf.Deg2Rad);
+            float dotR   = CfgDotSize.Value;
+            // Offset slightly off the wall to avoid z-fight.
+            Vector3 center = wallHit.point + wNorm * 0.003f;
+
+            Rigidbody hitRb  = wallHit.collider.attachedRigidbody;
+            bool      onSosig = hitRb != null && hitRb.GetComponentInParent<SosigLink>() != null;
+            Transform par    = onSosig ? hitRb.transform : null;
+
+            // Walk CDF array at configured stride (2 = half-image resolution).
+            int stride = Mathf.Max(1, CfgRayCount.Value);
+            var dots = new List<DotData>(_splatterUVs.Length / stride + 1);
+            for (int i = 0; i < _splatterUVs.Length; i += stride)
             {
-                // Sample a pixel from the splatter distribution.
-                // uv.x = left(-1)→right(+1), uv.y = bottom(-1)→top(+1) of image.
-                Vector2 uv  = SampleSplatter();
-                Vector3 dir = (fwd + right * uv.x * tanHalf + up * uv.y * tanHalf).normalized;
-
-                RaycastHit h;
-                if (!Physics.Raycast(exitPt, dir, out h, range)) continue;
-                if (IsSourceSosig(h.collider, srcSosig)) continue;
-                if (h.collider.GetComponentInParent<SosigWeapon>() != null) continue;
-
-                float dotR = CfgDotSize.Value + h.distance * CfgDotGrow.Value;
-
-                Rigidbody hitRb    = h.collider.attachedRigidbody;
-                bool      isSosig  = hitRb != null && hitRb.GetComponentInParent<SosigLink>() != null;
-                Transform par      = isSosig ? hitRb.transform : null;
-
-                if (par == null)
-                    staticDots.Add(new DotData(h.point, h.normal, dotR));
-                else
-                {
-                    if (!dynamicDots.ContainsKey(par))
-                        dynamicDots[par] = new List<DotData>();
-                    dynamicDots[par].Add(new DotData(h.point, h.normal, dotR));
-                }
+                Vector2 uv  = _splatterUVs[i];
+                Vector3 pos = center + wRight * (uv.x * stampR) + wUp * (uv.y * stampR);
+                dots.Add(new DotData(pos, wNorm, dotR));
             }
 
-            BuildDotMesh(staticDots, null, col);
-            foreach (var kv in dynamicDots)
-                BuildDotMesh(kv.Value, kv.Key, col);
+            BuildDotMesh(dots, par, col);
+            Log.LogInfo("[BloodSystem] proj " + dots.Count + " dots stampR=" + stampR.ToString("F2") + "m");
         }
 
         internal static void SpawnBloodSpray(Vector3 pos, Vector3 fwd, Color col)
