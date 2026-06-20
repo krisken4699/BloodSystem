@@ -34,8 +34,9 @@ namespace BloodSystem
         internal static readonly Color _mustard = new Color(0.9f, 0.8f, 0f, 1f);
 
         // Materials.
-        internal static Material        _dotMat;   // particles: spray + drip
-        // Per-color mesh decal materials: blood color baked into texture, no vertex color dependency.
+        internal static Material _dotMat;      // particles: spray + drip (Sprites/Default + splatter PNG)
+        static Material          _splatDotMat; // projection dots PS (Sprites/Default + white soft circle)
+        // Per-color mesh decal materials (used only for drip floor stains).
         static readonly Dictionary<Color, Material> _meshMatCache = new Dictionary<Color, Material>();
 
         // Spray PSes: pellets (fast/small) + fog (slow/large/splatter texture).
@@ -76,12 +77,18 @@ namespace BloodSystem
 
             // Particle material: Sprites/Default + splatter PNG (spray + drip).
             Shader spriteShader = Shader.Find("Sprites/Default");
-            if (ReferenceEquals(spriteShader, null)) spriteShader = Shader.Find("Transparent/Diffuse");
+            if (ReferenceEquals(spriteShader, null)) spriteShader = Shader.Find("Particles/Alpha Blended");
             if (!ReferenceEquals(spriteShader, null))
             {
                 _dotMat = new Material(spriteShader);
                 if (!ReferenceEquals(splatTex, null)) _dotMat.mainTexture = splatTex;
+
+                // Projection dot material: same shader, white gaussian circle.
+                // Particle color field carries blood tint: Sprites/Default = tex × vertexColor.
+                _splatDotMat = new Material(spriteShader);
+                _splatDotMat.mainTexture = MakeColoredSoftCircle(64, Color.white);
             }
+            Log.LogInfo("[BloodSystem] spriteShader=" + (spriteShader != null ? spriteShader.name : "NULL"));
 
             BuildSprayPSes();
             new Harmony("h3vr.invent60.bloodsystem").PatchAll(typeof(BloodSystemPatches));
@@ -233,8 +240,8 @@ namespace BloodSystem
                 var sh = _fogPS.shape;
                 sh.enabled   = true;
                 sh.shapeType = ParticleSystemShapeType.Cone;
-                sh.angle     = 70f;
-                sh.radius    = 0.12f;
+                sh.angle     = 23f;
+                sh.radius    = 0.05f;
                 // Alpha fades 1→0 over lifetime so particles dissolve rather than pop out.
                 var col = _fogPS.colorOverLifetime;
                 col.enabled = true;
@@ -250,6 +257,8 @@ namespace BloodSystem
                 rotOvLt.z       = new ParticleSystem.MinMaxCurve(-1.2f, 1.2f);
                 var psr = _fogPS.GetComponent<ParticleSystemRenderer>();
                 if (psr != null && !ReferenceEquals(_dotMat, null)) psr.material = _dotMat;
+                // Fog particles leave floor/surface stains when they land.
+                go.AddComponent<BloodDripStainer>().BloodColor = _mustard;
                 go.SetActive(true);
             }
         }
@@ -381,32 +390,31 @@ namespace BloodSystem
 
         // ── Spawn functions ───────────────────────────────────────────────────────
 
-        // Per-ray CDF projection: fire N rays whose directions are drawn from the splatter image
-        // distribution. Dense image areas = more rays land there = matches blood texture pattern.
+        // Fires N CDF-weighted rays from exit wound. Hits collected into a ParticleSystem
+        // via SetParticles — uses the same particle renderer as spray (confirmed working).
+        // Only fires on exit wound (dot < 0 check in PostMove).
         internal static void SpawnProjection(Vector3 exitPt, Vector3 projDir, Sosig srcSosig)
         {
             if (!CfgEnabled.Value) return;
+            if (ReferenceEquals(_splatDotMat, null) && ReferenceEquals(_dotMat, null)) return;
             try
             {
                 if (ReferenceEquals(_splatterUVs, null) || _splatterUVs.Length == 0)
                     BuildFallbackGrid(200);
 
-                Color   col      = GetSosigBloodColor(srcSosig);
-                Vector3 fwd      = projDir.normalized;
-                float   tanHalf  = Mathf.Tan(CfgConeAngle.Value * Mathf.Deg2Rad);
-                float   range    = CfgRange.Value;
+                Color   col     = GetSosigBloodColor(srcSosig);
+                Vector3 fwd     = projDir.normalized;
+                float   tanHalf = Mathf.Tan(CfgConeAngle.Value * Mathf.Deg2Rad);
+                float   range   = CfgRange.Value;
 
                 Vector3 worldUp = Mathf.Abs(Vector3.Dot(fwd, Vector3.up)) > 0.99f ? Vector3.forward : Vector3.up;
                 Vector3 right   = Vector3.Cross(worldUp, fwd).normalized;
                 Vector3 up      = Vector3.Cross(fwd, right);
 
-                // stride through CDF so exactly N rays fire, distributed by image density
                 int N      = Mathf.Max(1, CfgRayCount.Value);
                 int stride = Mathf.Max(1, _splatterUVs.Length / N);
 
-                var staticDots  = new List<DotData>(N);
-                var dynamicDots = new Dictionary<Transform, List<DotData>>();
-
+                var particles = new List<ParticleSystem.Particle>(N);
                 for (int i = 0; i < _splatterUVs.Length; i += stride)
                 {
                     Vector2 uv  = _splatterUVs[i];
@@ -418,23 +426,36 @@ namespace BloodSystem
                     if (h.collider.GetComponentInParent<SosigWeapon>() != null) continue;
 
                     float dotR = CfgDotSize.Value + h.distance * CfgDotGrow.Value;
-
-                    Rigidbody hitRb   = h.collider.attachedRigidbody;
-                    bool      isSosig = hitRb != null && hitRb.GetComponentInParent<SosigLink>() != null;
-                    Transform par     = isSosig ? hitRb.transform : null;
-
-                    if (par == null)
-                        staticDots.Add(new DotData(h.point, h.normal, dotR));
-                    else
-                    {
-                        if (!dynamicDots.ContainsKey(par)) dynamicDots[par] = new List<DotData>();
-                        dynamicDots[par].Add(new DotData(h.point, h.normal, dotR));
-                    }
+                    var p = new ParticleSystem.Particle();
+                    p.position         = h.point + h.normal * 0.005f;
+                    p.velocity         = Vector3.zero;
+                    p.startLifetime    = CfgLifetime.Value;
+                    p.remainingLifetime = CfgLifetime.Value;
+                    p.startSize        = dotR * 2f;
+                    p.startColor       = col;
+                    particles.Add(p);
                 }
 
-                Log.LogInfo("[BloodSystem] proj N=" + N + " stride=" + stride + " static=" + staticDots.Count + " shader=" + (GetMeshMat(col) != null ? GetMeshMat(col).shader.name : "NULL"));
-                BuildDotMesh(staticDots, null, col);
-                foreach (var kv in dynamicDots) BuildDotMesh(kv.Value, kv.Key, col);
+                Log.LogInfo("[BloodSystem] proj N=" + N + " hits=" + particles.Count);
+                if (particles.Count == 0) return;
+
+                var arr = particles.ToArray();
+                var go  = new GameObject("BloodSplat");
+                var ps  = go.AddComponent<ParticleSystem>();
+                var mn  = ps.main;
+                mn.loop              = false;
+                mn.playOnAwake       = false;
+                mn.maxParticles      = arr.Length + 1;
+                mn.startLifetime     = new ParticleSystem.MinMaxCurve(CfgLifetime.Value);
+                mn.startSpeed        = new ParticleSystem.MinMaxCurve(0f);
+                mn.gravityModifier   = 0f;
+                mn.simulationSpace   = ParticleSystemSimulationSpace.World;
+                var em = ps.emission; em.enabled = false;
+                var psr = ps.GetComponent<ParticleSystemRenderer>();
+                psr.material = !ReferenceEquals(_splatDotMat, null) ? _splatDotMat : _dotMat;
+                ps.Play();
+                ps.SetParticles(arr, arr.Length);
+                UnityEngine.Object.Destroy(go, CfgLifetime.Value + 2f);
             }
             catch (System.Exception ex)
             {
@@ -465,6 +486,8 @@ namespace BloodSystem
                 var m = _fogPS.main;
                 Color fogCol = new Color(col.r, col.g, col.b, 0.6f);
                 m.startColor = new ParticleSystem.MinMaxGradient(fogCol);
+                var stainer = _fogPS.GetComponent<BloodDripStainer>();
+                if (stainer != null) stainer.BloodColor = col;
                 _fogPS.Emit(50);
             }
         }
