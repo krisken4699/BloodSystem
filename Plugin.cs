@@ -38,8 +38,9 @@ namespace BloodSystem
         // Per-color mesh decal materials: blood color baked into texture, no vertex color dependency.
         static readonly Dictionary<Color, Material> _meshMatCache = new Dictionary<Color, Material>();
 
-        // Spray PS.
-        static ParticleSystem _sprayPS;
+        // Spray PSes: pellets (fast/small) + fog (slow/large/splatter texture).
+        static ParticleSystem _pelletPS;
+        static ParticleSystem _fogPS;
 
         // Weighted splatter distribution pre-computed from PNG.
         // _splatterUVs[i] = (u,v) in [-1,1]x[-1,1], _cumWeights[i] = cumulative weight up to i.
@@ -59,15 +60,19 @@ namespace BloodSystem
             CfgDotGrow   = Config.Bind("Blood", "Dot grow per metre", 0.0005f, "Extra radius per metre of ray distance.");
             CfgRange     = Config.Bind("Blood", "Range metres",     50f,    "Max splatter distance.");
 
-            // Load splatter PNG. Used for both particle material AND distribution pre-compute.
+            // Load splatter PNG. Used for particle texture AND analytical projection CDF.
             Texture2D splatTex = LoadFirstPng();
 
-            // Pre-compute weighted CDF from splatter PNG.
-            // Darker + more opaque pixels have higher weight = more rays go there.
             if (!ReferenceEquals(splatTex, null))
+            {
                 BuildSampleData(splatTex);
+                Log.LogInfo("[BloodSystem] PNG loaded, pool=" + (_splatterUVs != null ? _splatterUVs.Length.ToString() : "0"));
+            }
             else
-                Log.LogWarning("[BloodSystem] No PNG found — using uniform cone sampling.");
+            {
+                Log.LogWarning("[BloodSystem] No PNG in plugin folder — generating uniform grid fallback.");
+                BuildFallbackGrid(320); // 320x320 = ~102K points uniform
+            }
 
             // Particle material: Sprites/Default + splatter PNG (spray + drip).
             Shader spriteShader = Shader.Find("Sprites/Default");
@@ -78,9 +83,9 @@ namespace BloodSystem
                 if (!ReferenceEquals(splatTex, null)) _dotMat.mainTexture = splatTex;
             }
 
-            BuildSprayPS();
+            BuildSprayPSes();
             new Harmony("h3vr.invent60.bloodsystem").PatchAll(typeof(BloodSystemPatches));
-            Log.LogInfo("[BloodSystem] 1.0.0 loaded. splatPool=" + (_splatterUVs != null ? _splatterUVs.Length.ToString() : "0"));
+            Log.LogInfo("[BloodSystem] 1.0.0 ready.");
         }
 
         // ── Startup helpers ───────────────────────────────────────────────────────
@@ -167,29 +172,72 @@ namespace BloodSystem
             return tex;
         }
 
-        void BuildSprayPS()
+        // Uniform grid fallback when no PNG is present in the plugin folder.
+        static void BuildFallbackGrid(int side)
         {
-            var go = new GameObject("BloodSprayPS");
-            DontDestroyOnLoad(go);
-            go.SetActive(false);
-            _sprayPS = go.AddComponent<ParticleSystem>();
-            var main = _sprayPS.main;
-            main.startLifetime   = new ParticleSystem.MinMaxCurve(0.2f, 0.6f);
-            main.startSpeed      = new ParticleSystem.MinMaxCurve(3f, 16f);
-            main.startSize       = new ParticleSystem.MinMaxCurve(0.008f, 0.025f);
-            main.maxParticles    = 2000;
-            main.gravityModifier = 1.2f;
-            main.loop            = false;
-            main.playOnAwake     = false;
-            main.startColor      = new ParticleSystem.MinMaxGradient(_mustard);
-            var sh = _sprayPS.shape;
-            sh.enabled   = true;
-            sh.shapeType = ParticleSystemShapeType.Cone;
-            sh.angle     = 18f;
-            sh.radius    = 0.01f;
-            var psr = _sprayPS.GetComponent<ParticleSystemRenderer>();
-            if (psr != null && !ReferenceEquals(_dotMat, null)) psr.material = _dotMat;
-            go.SetActive(true);
+            var uvList = new List<Vector2>(side * side);
+            for (int y = 0; y < side; y++)
+            for (int x = 0; x < side; x++)
+            {
+                float u = ((float)x / (side - 1)) * 2f - 1f;
+                float v = ((float)y / (side - 1)) * 2f - 1f;
+                uvList.Add(new Vector2(u, v));
+            }
+            _splatterUVs = uvList.ToArray();
+            _cumWeights  = new float[0]; // unused in analytical projection
+        }
+
+        void BuildSprayPSes()
+        {
+            // ── Pellet PS: fast, small, tight cone — the visible spray droplets ──────
+            {
+                var go = new GameObject("BloodPelletPS");
+                DontDestroyOnLoad(go);
+                go.SetActive(false);
+                _pelletPS = go.AddComponent<ParticleSystem>();
+                var main = _pelletPS.main;
+                main.startLifetime   = new ParticleSystem.MinMaxCurve(0.3f, 0.9f);
+                main.startSpeed      = new ParticleSystem.MinMaxCurve(4f, 22f);
+                main.startSize       = new ParticleSystem.MinMaxCurve(0.006f, 0.022f);
+                main.maxParticles    = 3000;
+                main.gravityModifier = 1.5f;
+                main.loop            = false;
+                main.playOnAwake     = false;
+                main.startColor      = new ParticleSystem.MinMaxGradient(_mustard);
+                var sh = _pelletPS.shape;
+                sh.enabled   = true;
+                sh.shapeType = ParticleSystemShapeType.Cone;
+                sh.angle     = 35f;   // wider first ring
+                sh.radius    = 0.04f;
+                var psr = _pelletPS.GetComponent<ParticleSystemRenderer>();
+                if (psr != null && !ReferenceEquals(_dotMat, null)) psr.material = _dotMat;
+                go.SetActive(true);
+            }
+
+            // ── Fog PS: slow, large, wide — poofy blood mist using splatter texture ──
+            {
+                var go = new GameObject("BloodFogPS");
+                DontDestroyOnLoad(go);
+                go.SetActive(false);
+                _fogPS = go.AddComponent<ParticleSystem>();
+                var main = _fogPS.main;
+                main.startLifetime   = new ParticleSystem.MinMaxCurve(0.6f, 1.4f);
+                main.startSpeed      = new ParticleSystem.MinMaxCurve(0.5f, 4f);
+                main.startSize       = new ParticleSystem.MinMaxCurve(0.04f, 0.14f);
+                main.maxParticles    = 1000;
+                main.gravityModifier = 0.25f;  // floats
+                main.loop            = false;
+                main.playOnAwake     = false;
+                main.startColor      = new ParticleSystem.MinMaxGradient(_mustard);
+                var sh = _fogPS.shape;
+                sh.enabled   = true;
+                sh.shapeType = ParticleSystemShapeType.Cone;
+                sh.angle     = 55f;   // much wider — second, outer ring
+                sh.radius    = 0.08f;
+                var psr = _fogPS.GetComponent<ParticleSystemRenderer>();
+                if (psr != null && !ReferenceEquals(_dotMat, null)) psr.material = _dotMat;
+                go.SetActive(true);
+            }
         }
 
         // ── Helpers ───────────────────────────────────────────────────────────────
@@ -319,7 +367,6 @@ namespace BloodSystem
         internal static void SpawnProjection(Vector3 exitPt, Vector3 projDir, Sosig srcSosig)
         {
             if (!CfgEnabled.Value) return;
-            if (_splatterUVs == null || _splatterUVs.Length == 0) return;
 
             Color   col  = GetSosigBloodColor(srcSosig);
             Vector3 fwd  = projDir.normalized;
@@ -362,12 +409,28 @@ namespace BloodSystem
 
         internal static void SpawnBloodSpray(Vector3 pos, Vector3 fwd, Color col)
         {
-            if (ReferenceEquals(_sprayPS, null)) return;
-            _sprayPS.gameObject.transform.position = pos;
-            _sprayPS.gameObject.transform.rotation = Quaternion.LookRotation(fwd);
-            var main = _sprayPS.main;
-            main.startColor = new ParticleSystem.MinMaxGradient(col);
-            _sprayPS.Emit(500);
+            if (!CfgEnabled.Value) return;
+            Quaternion rot = Quaternion.LookRotation(fwd);
+
+            // Pellets: fast, tight first ring.
+            if (!ReferenceEquals(_pelletPS, null))
+            {
+                _pelletPS.gameObject.transform.SetPositionAndRotation(pos, rot);
+                var m = _pelletPS.main;
+                m.startColor = new ParticleSystem.MinMaxGradient(col);
+                _pelletPS.Emit(600);
+            }
+
+            // Fog: slow, wide second ring, uses splatter texture per particle.
+            if (!ReferenceEquals(_fogPS, null))
+            {
+                _fogPS.gameObject.transform.SetPositionAndRotation(pos, rot);
+                var m = _fogPS.main;
+                // Slightly transparent so fog particles don't fully occlude wall.
+                Color fogCol = new Color(col.r, col.g, col.b, 0.55f);
+                m.startColor = new ParticleSystem.MinMaxGradient(fogCol);
+                _fogPS.Emit(120);
+            }
         }
 
         internal static void SpawnDrip(Vector3 pos, Color col)
