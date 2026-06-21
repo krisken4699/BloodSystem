@@ -363,8 +363,36 @@ namespace BloodSystem
             }
             catch (Exception ex) { Log.LogWarning("[BloodSystem] TryGrabDecal TranspSpec: " + ex.Message); }
 
-            // 3 — Alloy _ALPHATEST_ON fallback: hard circle edges but full Alloy PBR reflectiveness.
-            // Only used if Transparent/Specular not found.
+            // 3 — Standard shader fade mode: Unity always includes this (pink fallback shader).
+            // _ALPHABLEND_ON variant is compiled in every Unity build.
+            // mainTexture alpha = our gaussian soft circle → actual soft edges.
+            if (ReferenceEquals(_decalSourceMat, null))
+            {
+                try
+                {
+                    Shader std = Shader.Find("Standard");
+                    if (!ReferenceEquals(std, null))
+                    {
+                        var stdMat = new Material(std);
+                        stdMat.SetFloat("_Mode",    2f);  // Fade
+                        stdMat.EnableKeyword("_ALPHABLEND_ON");
+                        stdMat.DisableKeyword("_ALPHATEST_ON");
+                        stdMat.DisableKeyword("_ALPHAPREMULTIPLY_ON");
+                        stdMat.SetInt("_SrcBlend", 5);    // SrcAlpha
+                        stdMat.SetInt("_DstBlend", 10);   // OneMinusSrcAlpha
+                        stdMat.SetInt("_ZWrite",   0);
+                        stdMat.renderQueue = 3000;
+                        stdMat.SetInt("_Cull",     0);
+                        _decalSourceMat = stdMat;
+                        Log.LogInfo("[BloodSystem] StandardFadeSrc");
+                    }
+                    else Log.LogWarning("[BloodSystem] Standard not in build.");
+                }
+                catch (Exception ex) { Log.LogWarning("[BloodSystem] TryGrabDecal Standard: " + ex.Message); }
+            }
+
+            // 4 — Alloy _ALPHATEST_ON fallback: hard circle edges but full Alloy PBR reflectiveness.
+            // Only used if Standard also missing (shouldn't happen in any Unity build).
             if (ReferenceEquals(_decalSourceMat, null))
             {
                 try
@@ -461,29 +489,33 @@ namespace BloodSystem
 
             // Alloy Core PBR properties (exact names from shader source)
             if (m.HasProperty("_Metal"))          m.SetFloat("_Metal",          0f);
-            if (m.HasProperty("_Specularity"))    m.SetFloat("_Specularity",    0.2f);   // flashlight won't overblow
-            if (m.HasProperty("_Roughness"))      m.SetFloat("_Roughness",      0.15f);  // wet but not chrome
+            if (m.HasProperty("_Specularity"))    m.SetFloat("_Specularity",    0.15f);  // flashlight won't overblow
+            if (m.HasProperty("_Roughness"))      m.SetFloat("_Roughness",      0.4f);   // wet but not mirror
             // Kill emission: Alloy uses _EmissionColor (half3) + _EMISSION keyword
             if (m.HasProperty("_EmissionColor"))  m.SetColor("_EmissionColor",  Color.black);
             m.DisableKeyword("_EMISSION");
+            m.globalIlluminationFlags = MaterialGlobalIlluminationFlags.EmissiveIsBlack;
 
             // Unity Standard shader properties (different names from Alloy)
             if (m.HasProperty("_Metallic"))       m.SetFloat("_Metallic",       0f);    // non-metallic
-            if (m.HasProperty("_Smoothness"))     m.SetFloat("_Smoothness",     0.9f);  // very smooth = reflective
+            if (m.HasProperty("_Smoothness"))     m.SetFloat("_Smoothness",     0.25f); // low — stacked quads don't blow out
             // Legacy fallback shaders (Transparent/Specular etc.) use these
-            if (m.HasProperty("_SpecColor"))      m.SetColor("_SpecColor",      new Color(0.3f, 0.3f, 0.3f));
-            if (m.HasProperty("_Shininess"))      m.SetFloat("_Shininess",      0.7f);
+            if (m.HasProperty("_SpecColor"))      m.SetColor("_SpecColor",      new Color(0.1f, 0.1f, 0.1f));
+            if (m.HasProperty("_Shininess"))      m.SetFloat("_Shininess",      0.3f);
         }
 
         // ── Spray materials ───────────────────────────────────────────────────────
 
         static Material BuildFogMaterial()
         {
-            Shader sh = Shader.Find("Particles/Standard Unlit");
+            Shader sh = Shader.Find("Particles/Standard Lit");
+            bool   lit = !ReferenceEquals(sh, null);
+            if (!lit) sh = Shader.Find("Particles/Standard Unlit");
             if (ReferenceEquals(sh, null)) sh = Shader.Find("Particles/Additive");
             if (ReferenceEquals(sh, null)) sh = Shader.Find("Sprites/Default");
             if (ReferenceEquals(sh, null)) return null;
             var mat = new Material(sh);
+            if (lit) SetParticleFadeMode(mat);
             // Fog uses the blood splatter PNG so puffs have the splatter shape
             if (!ReferenceEquals(_firstBloodTex, null)) mat.mainTexture = _firstBloodTex;
             return mat;
@@ -491,14 +523,30 @@ namespace BloodSystem
 
         static Material BuildPelletMaterial()
         {
-            Shader sh = Shader.Find("Particles/Standard Unlit");
+            Shader sh = Shader.Find("Particles/Standard Lit");
+            bool   lit = !ReferenceEquals(sh, null);
+            if (!lit) sh = Shader.Find("Particles/Standard Unlit");
             if (ReferenceEquals(sh, null)) sh = Shader.Find("Particles/Additive");
             if (ReferenceEquals(sh, null)) sh = Shader.Find("Sprites/Default");
             if (ReferenceEquals(sh, null)) return null;
             var mat = new Material(sh);
+            if (lit) SetParticleFadeMode(mat);
             // Pellets use soft circle so individual drops are round
             if (!ReferenceEquals(_decalTex, null)) mat.mainTexture = _decalTex;
             return mat;
+        }
+
+        // Particles/Standard Lit defaults to Opaque — force Fade so alpha from colorOverLifetime works.
+        static void SetParticleFadeMode(Material mat)
+        {
+            mat.SetFloat("_Mode", 2f);           // 2 = Fade
+            mat.EnableKeyword("_ALPHABLEND_ON");
+            mat.DisableKeyword("_ALPHATEST_ON");
+            mat.DisableKeyword("_ALPHAPREMULTIPLY_ON");
+            mat.SetInt("_SrcBlend", 5);           // SrcAlpha
+            mat.SetInt("_DstBlend", 10);          // OneMinusSrcAlpha
+            mat.SetInt("_ZWrite",   0);
+            mat.renderQueue = 3000;
         }
 
         void BuildSprayPSes()
@@ -528,7 +576,13 @@ namespace BloodSystem
                 sh.angle     = 28f;
                 sh.radius    = 0.02f;
                 var psr = _pelletPS.GetComponent<ParticleSystemRenderer>();
-                if (psr != null && !ReferenceEquals(_pelletMat, null)) psr.material = _pelletMat;
+                if (psr != null)
+                {
+                    if (!ReferenceEquals(_pelletMat, null)) psr.material = _pelletMat;
+                    psr.renderMode    = (ParticleSystemRenderMode)1; // 1 = Stretch/StretchedBillboard
+                    psr.velocityScale = 0.06f; // stretch proportional to speed
+                    psr.lengthScale   = 3f;    // base elongation so drops look stretched even when slow
+                }
                 go.SetActive(true);
             }
 
