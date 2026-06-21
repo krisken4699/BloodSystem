@@ -77,13 +77,13 @@ namespace BloodSystem
 
             CfgEnabled   = Config.Bind("Blood", "Enabled",          true,   "Toggle all blood effects.");
             CfgLifetime  = Config.Bind("Blood", "Lifetime seconds",  30f,    "How long splash and drip stains last before despawning.");
-            CfgRayCount  = Config.Bind("Blood", "Rays per shot",     200,    "Splash ray count. Around 1500 was confirmed fine in testing; 200 is a safe default.");
+            CfgRayCount  = Config.Bind("Blood", "Rays per shot",     300,    "Splash ray count. Around 1500 was confirmed fine in testing; 300 is a safe default.");
             CfgConeAngle = Config.Bind("Blood", "Cone half-angle",   10f,    "Half-angle in degrees of the splash cone.");
-            CfgDotSize   = Config.Bind("Blood", "Dot base radius",   0.008f, "Base radius of each splash dot in metres. Scales linearly to 3x at 20 metres.");
+            CfgDotSize   = Config.Bind("Blood", "Dot base radius",   0.004f, "Base radius of each splash dot in metres. Scales linearly to 3x at 20 metres.");
             CfgRange     = Config.Bind("Blood", "Range metres",      15f,    "Maximum splash distance in metres.");
 
             // Soft-circle decal texture — all dot/stain rendering uses this (NOT the blood PNGs)
-            _decalTex = MakeSoftCircle(64);
+            _decalTex = MakeSoftCircle(96);
 
             // Load ALL blood PNGs and build combined CDF
             var allTextures = LoadAllPngs();
