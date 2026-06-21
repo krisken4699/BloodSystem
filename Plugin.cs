@@ -343,84 +343,61 @@ namespace BloodSystem
             }
             catch (Exception ex) { Log.LogWarning("[BloodSystem] TryGrabDecal WFX: " + ex.Message); }
 
-            // 2 — Alloy with _ALPHAPREMULTIPLY_ON (Transparent/premult mode).
-            // Scope glass in H3VR almost certainly uses _Mode=3 (Transparent) not _Mode=2 (Fade),
-            // so _ALPHAPREMULTIPLY_ON is likely compiled where _ALPHABLEND_ON is not.
-            // Premult blend: One, OneMinusSrcAlpha. Output alpha = mainTex.a → soft circle.
+            // 2 — Transparent/Specular: Unity built-in legacy shader, always in every Unity build.
+            // Alpha from mainTex.a (soft circle) + Blinn-Phong specular (wet/shiny look).
+            // Responds to scene lighting → dark in shadows, lit under flashlight. No glow.
+            // Preferred over Alloy because both Alloy blend variants (_ALPHABLEND_ON and
+            // _ALPHAPREMULTIPLY_ON) are NOT compiled in H3VR — confirmed squares in both cases.
+            // Only Alloy _ALPHATEST_ON (cutout) works but gives hard edges.
             try
             {
-                foreach (var rend in UnityEngine.Object.FindObjectsOfType<Renderer>())
+                Shader ts = Shader.Find("Transparent/Specular");
+                if (!ReferenceEquals(ts, null))
                 {
-                    foreach (var mat in rend.sharedMaterials)
-                    {
-                        if (ReferenceEquals(mat, null) || ReferenceEquals(mat.shader, null)) continue;
-                        string sn = mat.shader.name;
-                        if (!sn.StartsWith("Alloy")) continue;
-                        if (sn.Contains("Particle") || sn.Contains("Add") || sn.Contains("Unlit")) continue;
-                        if (!mat.HasProperty("_Roughness")) continue;
-
-                        var alloyMat = new Material(mat.shader);
-                        alloyMat.EnableKeyword("_ALPHAPREMULTIPLY_ON");
-                        alloyMat.DisableKeyword("_ALPHABLEND_ON");
-                        alloyMat.DisableKeyword("_ALPHATEST_ON");
-                        alloyMat.SetFloat("_Mode",     3f);   // 3=Transparent (premult)
-                        alloyMat.SetFloat("_Cutoff",   0f);
-                        alloyMat.SetInt("_SrcBlend",   1);    // One (premult: rgb already multiplied by a)
-                        alloyMat.SetInt("_DstBlend",   10);   // OneMinusSrcAlpha
-                        alloyMat.SetFloat("_ZWrite",   0f);
-                        alloyMat.renderQueue = 3000;
-                        alloyMat.SetInt("_Cull", 0);
-                        _decalSourceMat = alloyMat;
-                        Log.LogInfo("[BloodSystem] AlloyPremultSrc=" + sn);
-                        goto doneAlloyScan;
-                    }
+                    _decalSourceMat = new Material(ts);
+                    _decalSourceMat.renderQueue = 3000;
+                    _decalSourceMat.SetInt("_Cull", 0);
+                    Log.LogInfo("[BloodSystem] TransparentSpecularSrc");
                 }
-                Log.LogInfo("[BloodSystem] No lit Alloy found.");
-                doneAlloyScan:;
+                else Log.LogWarning("[BloodSystem] Transparent/Specular not in build.");
             }
-            catch (Exception ex) { Log.LogWarning("[BloodSystem] TryGrabDecal Alloy scan: " + ex.Message); }
+            catch (Exception ex) { Log.LogWarning("[BloodSystem] TryGrabDecal TranspSpec: " + ex.Message); }
 
-            // 3 — Standard _ALPHABLEND_ON: guaranteed in Unity Standard (multi_compile, always present).
-            // Previous session: Standard was overwritten by Alloy before it could be tested.
-            // Now Alloy already set above; Standard is only fallback if no lit Alloy found.
+            // 3 — Alloy _ALPHATEST_ON fallback: hard circle edges but full Alloy PBR reflectiveness.
+            // Only used if Transparent/Specular not found.
             if (ReferenceEquals(_decalSourceMat, null))
             {
                 try
                 {
-                    Shader std = Shader.Find("Standard");
-                    if (!ReferenceEquals(std, null))
+                    foreach (var rend in UnityEngine.Object.FindObjectsOfType<Renderer>())
                     {
-                        _decalSourceMat = new Material(std);
-                        _decalSourceMat.EnableKeyword("_ALPHABLEND_ON");
-                        _decalSourceMat.DisableKeyword("_ALPHATEST_ON");
-                        _decalSourceMat.DisableKeyword("_ALPHAPREMULTIPLY_ON");
-                        _decalSourceMat.SetFloat("_Mode",     2f);
-                        _decalSourceMat.SetFloat("_SrcBlend", 5f);
-                        _decalSourceMat.SetFloat("_DstBlend", 10f);
-                        _decalSourceMat.SetFloat("_ZWrite",   0f);
-                        _decalSourceMat.renderQueue = 3000;
-                        _decalSourceMat.SetInt("_Cull", 0);
-                        Log.LogInfo("[BloodSystem] StandardBlendSrc");
-                    }
-                }
-                catch (Exception ex) { Log.LogWarning("[BloodSystem] TryGrabDecal Standard: " + ex.Message); }
-            }
+                        foreach (var mat in rend.sharedMaterials)
+                        {
+                            if (ReferenceEquals(mat, null) || ReferenceEquals(mat.shader, null)) continue;
+                            string sn = mat.shader.name;
+                            if (!sn.StartsWith("Alloy")) continue;
+                            if (sn.Contains("Particle") || sn.Contains("Add") || sn.Contains("Unlit")) continue;
+                            if (!mat.HasProperty("_Roughness")) continue;
 
-            // 4 — Transparent/Specular: Blinn-Phong specular + alpha from mainTex. Always in Unity.
-            if (ReferenceEquals(_decalSourceMat, null))
-            {
-                try
-                {
-                    Shader ts = Shader.Find("Transparent/Specular");
-                    if (!ReferenceEquals(ts, null))
-                    {
-                        _decalSourceMat = new Material(ts);
-                        _decalSourceMat.renderQueue = 3000;
-                        _decalSourceMat.SetInt("_Cull", 0);
-                        Log.LogInfo("[BloodSystem] TransparentSpecularSrc");
+                            var alloyMat = new Material(mat.shader);
+                            alloyMat.EnableKeyword("_ALPHATEST_ON");
+                            alloyMat.DisableKeyword("_ALPHABLEND_ON");
+                            alloyMat.DisableKeyword("_ALPHAPREMULTIPLY_ON");
+                            alloyMat.SetFloat("_Mode",   1f);
+                            alloyMat.SetFloat("_Cutoff", 0.05f);
+                            alloyMat.SetInt("_SrcBlend", 1);
+                            alloyMat.SetInt("_DstBlend", 0);
+                            alloyMat.SetFloat("_ZWrite", 1f);
+                            alloyMat.renderQueue = 2450;
+                            alloyMat.SetInt("_Cull", 0);
+                            _decalSourceMat = alloyMat;
+                            Log.LogInfo("[BloodSystem] AlloyCutoutFallback=" + sn);
+                            goto doneAlloyScan;
+                        }
                     }
+                    doneAlloyScan:;
                 }
-                catch (Exception ex) { Log.LogWarning("[BloodSystem] TryGrabDecal TranspSpec: " + ex.Message); }
+                catch (Exception ex) { Log.LogWarning("[BloodSystem] TryGrabDecal Alloy: " + ex.Message); }
             }
         }
 
@@ -451,35 +428,25 @@ namespace BloodSystem
             m = new Material(sh);
             if (!ReferenceEquals(_decalTex, null)) m.mainTexture = _decalTex;
 
-            bool isAlloy    = sh.name.StartsWith("Alloy");
-            bool isStandard = sh.name == "Standard";
-            if (isAlloy)
+            if (sh.name.StartsWith("Alloy"))
             {
-                m.EnableKeyword("_ALPHAPREMULTIPLY_ON");
+                m.EnableKeyword("_ALPHATEST_ON");
                 m.DisableKeyword("_ALPHABLEND_ON");
-                m.DisableKeyword("_ALPHATEST_ON");
-                m.SetFloat("_Mode",    3f);
-                m.SetFloat("_Cutoff",  0f);
-                m.SetInt("_SrcBlend",  1);
-                m.SetInt("_DstBlend",  10);
-                m.SetFloat("_ZWrite",  0f);
-                m.renderQueue = 3000;
-            }
-            else if (isStandard)
-            {
-                m.EnableKeyword("_ALPHABLEND_ON");
-                m.DisableKeyword("_ALPHATEST_ON");
                 m.DisableKeyword("_ALPHAPREMULTIPLY_ON");
-                m.SetFloat("_Mode",     2f);
-                m.SetFloat("_SrcBlend", 5f);
-                m.SetFloat("_DstBlend", 10f);
-                m.SetFloat("_ZWrite",   0f);
+                m.SetFloat("_Mode",   1f);
+                m.SetFloat("_Cutoff", 0.05f);
+                m.SetInt("_SrcBlend", 1);
+                m.SetInt("_DstBlend", 0);
+                m.SetFloat("_ZWrite", 1f);
+                m.renderQueue = 2450;
+            }
+            else
+            {
                 m.renderQueue = 3000;
             }
 
             ApplyBloodProps(m, col);
             m.SetInt("_Cull", 0);
-            if (!isAlloy && !isStandard) m.renderQueue = 3000;
 
             _matCache[col] = m;
             return m;
