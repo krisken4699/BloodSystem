@@ -79,7 +79,7 @@ namespace BloodSystem
             CfgLifetime  = Config.Bind("Blood", "Lifetime seconds",  30f,    "How long splash and drip stains last before despawning.");
             CfgRayCount  = Config.Bind("Blood", "Rays per shot",     200,    "Splash ray count. Around 1500 was confirmed fine in testing; 200 is a safe default.");
             CfgConeAngle = Config.Bind("Blood", "Cone half-angle",   10f,    "Half-angle in degrees of the splash cone.");
-            CfgDotSize   = Config.Bind("Blood", "Dot base radius",   0.008f, "Base radius of each splash dot in metres. Scales to 3x at max range.");
+            CfgDotSize   = Config.Bind("Blood", "Dot base radius",   0.008f, "Base radius of each splash dot in metres. Scales linearly to 3x at 20 metres.");
             CfgRange     = Config.Bind("Blood", "Range metres",      15f,    "Maximum splash distance in metres.");
 
             // Soft-circle decal texture — all dot/stain rendering uses this (NOT the blood PNGs)
@@ -343,12 +343,10 @@ namespace BloodSystem
             }
             catch (Exception ex) { Log.LogWarning("[BloodSystem] TryGrabDecal WFX: " + ex.Message); }
 
-            // 2 — Scan for a lit Alloy Core material and set it up as CUTOUT (alpha-test) mode.
-            // _ALPHATEST_ON IS compiled in H3VR (used for scope reticles, foliage, etc.).
-            // _ALPHABLEND_ON was NOT compiled (proven by squares despite correct blend props).
-            // Cutout: pixels where mainTex.a < _Cutoff are discarded → circle from gaussian texture.
-            // _Cutoff=0.05 keeps ~93% fill radius (exp(-d²*3.5)=0.05 → d≈0.93 of quad half-size).
-            // Writes depth (ZWrite=1) → no sorting issues. renderQueue=2450 (AlphaTest bucket).
+            // 2 — Alloy with _ALPHAPREMULTIPLY_ON (Transparent/premult mode).
+            // Scope glass in H3VR almost certainly uses _Mode=3 (Transparent) not _Mode=2 (Fade),
+            // so _ALPHAPREMULTIPLY_ON is likely compiled where _ALPHABLEND_ON is not.
+            // Premult blend: One, OneMinusSrcAlpha. Output alpha = mainTex.a → soft circle.
             try
             {
                 foreach (var rend in UnityEngine.Object.FindObjectsOfType<Renderer>())
@@ -361,19 +359,19 @@ namespace BloodSystem
                         if (sn.Contains("Particle") || sn.Contains("Add") || sn.Contains("Unlit")) continue;
                         if (!mat.HasProperty("_Roughness")) continue;
 
-                        var alloyMat = new Material(mat.shader); // fresh — no sosig PBR maps
-                        alloyMat.EnableKeyword("_ALPHATEST_ON");
+                        var alloyMat = new Material(mat.shader);
+                        alloyMat.EnableKeyword("_ALPHAPREMULTIPLY_ON");
                         alloyMat.DisableKeyword("_ALPHABLEND_ON");
-                        alloyMat.DisableKeyword("_ALPHAPREMULTIPLY_ON");
-                        alloyMat.SetFloat("_Mode",   1f);    // 1=Cutout
-                        alloyMat.SetFloat("_Cutoff", 0.05f); // discard edge pixels → circle
-                        alloyMat.SetInt("_SrcBlend", 1);     // One
-                        alloyMat.SetInt("_DstBlend", 0);     // Zero
-                        alloyMat.SetFloat("_ZWrite", 1f);
-                        alloyMat.renderQueue = 2450;
+                        alloyMat.DisableKeyword("_ALPHATEST_ON");
+                        alloyMat.SetFloat("_Mode",     3f);   // 3=Transparent (premult)
+                        alloyMat.SetFloat("_Cutoff",   0f);
+                        alloyMat.SetInt("_SrcBlend",   1);    // One (premult: rgb already multiplied by a)
+                        alloyMat.SetInt("_DstBlend",   10);   // OneMinusSrcAlpha
+                        alloyMat.SetFloat("_ZWrite",   0f);
+                        alloyMat.renderQueue = 3000;
                         alloyMat.SetInt("_Cull", 0);
                         _decalSourceMat = alloyMat;
-                        Log.LogInfo("[BloodSystem] AlloyCutoutSrc=" + sn);
+                        Log.LogInfo("[BloodSystem] AlloyPremultSrc=" + sn);
                         goto doneAlloyScan;
                     }
                 }
@@ -382,7 +380,9 @@ namespace BloodSystem
             }
             catch (Exception ex) { Log.LogWarning("[BloodSystem] TryGrabDecal Alloy scan: " + ex.Message); }
 
-            // 3 — Standard shader cutout fallback (always compiled, always available).
+            // 3 — Standard _ALPHABLEND_ON: guaranteed in Unity Standard (multi_compile, always present).
+            // Previous session: Standard was overwritten by Alloy before it could be tested.
+            // Now Alloy already set above; Standard is only fallback if no lit Alloy found.
             if (ReferenceEquals(_decalSourceMat, null))
             {
                 try
@@ -391,19 +391,36 @@ namespace BloodSystem
                     if (!ReferenceEquals(std, null))
                     {
                         _decalSourceMat = new Material(std);
-                        _decalSourceMat.EnableKeyword("_ALPHATEST_ON");
-                        _decalSourceMat.DisableKeyword("_ALPHABLEND_ON");
-                        _decalSourceMat.SetFloat("_Mode",   1f);
-                        _decalSourceMat.SetFloat("_Cutoff", 0.05f);
-                        _decalSourceMat.SetInt("_SrcBlend", 1);
-                        _decalSourceMat.SetInt("_DstBlend", 0);
-                        _decalSourceMat.SetFloat("_ZWrite", 1f);
-                        _decalSourceMat.renderQueue = 2450;
+                        _decalSourceMat.EnableKeyword("_ALPHABLEND_ON");
+                        _decalSourceMat.DisableKeyword("_ALPHATEST_ON");
+                        _decalSourceMat.DisableKeyword("_ALPHAPREMULTIPLY_ON");
+                        _decalSourceMat.SetFloat("_Mode",     2f);
+                        _decalSourceMat.SetFloat("_SrcBlend", 5f);
+                        _decalSourceMat.SetFloat("_DstBlend", 10f);
+                        _decalSourceMat.SetFloat("_ZWrite",   0f);
+                        _decalSourceMat.renderQueue = 3000;
                         _decalSourceMat.SetInt("_Cull", 0);
-                        Log.LogInfo("[BloodSystem] StandardCutoutSrc");
+                        Log.LogInfo("[BloodSystem] StandardBlendSrc");
                     }
                 }
                 catch (Exception ex) { Log.LogWarning("[BloodSystem] TryGrabDecal Standard: " + ex.Message); }
+            }
+
+            // 4 — Transparent/Specular: Blinn-Phong specular + alpha from mainTex. Always in Unity.
+            if (ReferenceEquals(_decalSourceMat, null))
+            {
+                try
+                {
+                    Shader ts = Shader.Find("Transparent/Specular");
+                    if (!ReferenceEquals(ts, null))
+                    {
+                        _decalSourceMat = new Material(ts);
+                        _decalSourceMat.renderQueue = 3000;
+                        _decalSourceMat.SetInt("_Cull", 0);
+                        Log.LogInfo("[BloodSystem] TransparentSpecularSrc");
+                    }
+                }
+                catch (Exception ex) { Log.LogWarning("[BloodSystem] TryGrabDecal TranspSpec: " + ex.Message); }
             }
         }
 
@@ -434,23 +451,35 @@ namespace BloodSystem
             m = new Material(sh);
             if (!ReferenceEquals(_decalTex, null)) m.mainTexture = _decalTex;
 
-            bool usesAlphaKeywords = sh.name.StartsWith("Alloy") || sh.name == "Standard";
-            if (usesAlphaKeywords)
+            bool isAlloy    = sh.name.StartsWith("Alloy");
+            bool isStandard = sh.name == "Standard";
+            if (isAlloy)
             {
-                m.EnableKeyword("_ALPHATEST_ON");
+                m.EnableKeyword("_ALPHAPREMULTIPLY_ON");
                 m.DisableKeyword("_ALPHABLEND_ON");
+                m.DisableKeyword("_ALPHATEST_ON");
+                m.SetFloat("_Mode",    3f);
+                m.SetFloat("_Cutoff",  0f);
+                m.SetInt("_SrcBlend",  1);
+                m.SetInt("_DstBlend",  10);
+                m.SetFloat("_ZWrite",  0f);
+                m.renderQueue = 3000;
+            }
+            else if (isStandard)
+            {
+                m.EnableKeyword("_ALPHABLEND_ON");
+                m.DisableKeyword("_ALPHATEST_ON");
                 m.DisableKeyword("_ALPHAPREMULTIPLY_ON");
-                m.SetFloat("_Mode",   1f);    // Cutout
-                m.SetFloat("_Cutoff", 0.05f);
-                m.SetInt("_SrcBlend", 1);     // One
-                m.SetInt("_DstBlend", 0);     // Zero
-                m.SetFloat("_ZWrite", 1f);
-                m.renderQueue = 2450;
+                m.SetFloat("_Mode",     2f);
+                m.SetFloat("_SrcBlend", 5f);
+                m.SetFloat("_DstBlend", 10f);
+                m.SetFloat("_ZWrite",   0f);
+                m.renderQueue = 3000;
             }
 
             ApplyBloodProps(m, col);
             m.SetInt("_Cull", 0);
-            if (!usesAlphaKeywords) m.renderQueue = 2450;
+            if (!isAlloy && !isStandard) m.renderQueue = 3000;
 
             _matCache[col] = m;
             return m;
@@ -624,7 +653,7 @@ namespace BloodSystem
                     if (h.collider.GetComponentInParent<SosigWeapon>() != null) continue;
 
                     // Size: base at close range, scales to 3x at CfgRange (half-range = 2x)
-                    float dotR = CfgDotSize.Value * Mathf.Clamp(1f + h.distance / (range * 0.5f), 1f, 3f);
+                    float dotR = CfgDotSize.Value * Mathf.Clamp(1f + h.distance / 10f, 1f, 3f);
                     int   bin  = Mathf.FloorToInt(h.distance / projSpeed / BIN_S);
 
                     Rigidbody hitRb = h.collider.attachedRigidbody;
