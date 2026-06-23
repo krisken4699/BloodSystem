@@ -102,8 +102,9 @@ namespace BloodSystem
             // Soft-circle decal texture — all dot/stain rendering uses this (NOT the blood PNGs)
             _decalTex = MakeSoftCircle(96);
 
-            // Try to restore Alloy material from last session's cache file — instant, no scene scan.
-            TryLoadAlloyCacheFromFile();
+            // Load Alloy/Core material from AssetBundle shipped with the mod.
+            // If bundle missing (dev env), falls back to scene scan on first sosig spawn.
+            TryLoadFromBundle();
 
             // Dot base material: Sprites/Default — always compiled in any Unity build,
             // alpha-blends correctly, and reads mesh.colors (vertex colors) so per-dot
@@ -352,79 +353,35 @@ namespace BloodSystem
                     ? _splatterNormals[idx] : new Vector3(0f, 0f, 1f);
         }
 
-        // ── Alloy material cache (persists across sessions) ───────────────────────
+        // ── Alloy material from AssetBundle ──────────────────────────────────────
 
-        static string AlloyMatCachePath =>
-            Path.Combine(Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location),
-                         "alloy_mat.cache");
-
-        // Reconstruct Alloy/Core material from saved keywords + blend state.
-        // Works because H3VR always compiles the glass transparent variant — Shader.Find finds it.
-        static void TryLoadAlloyCacheFromFile()
+        static void TryLoadFromBundle()
         {
             try
             {
-                string path = AlloyMatCachePath;
-                if (!File.Exists(path)) return;
-                var dict = new Dictionary<string, string>();
-                foreach (string line in File.ReadAllLines(path))
+                string bundlePath = Path.Combine(
+                    Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location),
+                    "bloodsystem");
+                if (!File.Exists(bundlePath))
                 {
-                    int eq = line.IndexOf('=');
-                    if (eq < 0) continue;
-                    dict[line.Substring(0, eq).Trim()] = line.Substring(eq + 1).Trim();
+                    Log.LogInfo("[BloodSystem] No bundle found — will grab from scene on first sosig spawn.");
+                    return;
                 }
-                string sn;
-                if (!dict.TryGetValue("shaderName", out sn)) return;
-                Shader sh = Shader.Find(sn);
-                if (ReferenceEquals(sh, null))
-                { Log.LogWarning("[BloodSystem] Cache shader not found: " + sn); return; }
+                var bundle = AssetBundle.LoadFromFile(bundlePath);
+                if (ReferenceEquals(bundle, null))
+                { Log.LogWarning("[BloodSystem] AssetBundle.LoadFromFile returned null."); return; }
 
-                var mat = new Material(sh);
-                string v;
-                if (dict.TryGetValue("renderQueue", out v)) mat.renderQueue = int.Parse(v);
-                if (dict.TryGetValue("_SrcBlend",   out v) && mat.HasProperty("_SrcBlend"))
-                    mat.SetInt("_SrcBlend", int.Parse(v));
-                if (dict.TryGetValue("_DstBlend",   out v) && mat.HasProperty("_DstBlend"))
-                    mat.SetInt("_DstBlend", int.Parse(v));
-                if (dict.TryGetValue("_ZWrite",     out v) && mat.HasProperty("_ZWrite"))
-                    mat.SetInt("_ZWrite", int.Parse(v));
-                if (dict.TryGetValue("_Mode",       out v) && mat.HasProperty("_Mode"))
-                    mat.SetFloat("_Mode", float.Parse(v));
-                if (dict.TryGetValue("keywords",    out v) && !string.IsNullOrEmpty(v))
-                    foreach (string kw in v.Split(','))
-                        if (!string.IsNullOrEmpty(kw.Trim())) mat.EnableKeyword(kw.Trim());
-                mat.SetInt("_Cull", 0);
+                var mat = bundle.LoadAsset<Material>("BloodDecal");
+                bundle.Unload(false); // keep assets in memory, unload the bundle container
+                if (ReferenceEquals(mat, null))
+                { Log.LogWarning("[BloodSystem] BloodDecal material not found in bundle."); return; }
 
-                _decalSourceMat      = mat;
+                _decalSourceMat = new Material(mat);
+                _decalSourceMat.SetInt("_Cull", 0);
                 _decalSourceSearched = true;
-                Log.LogInfo("[BloodSystem] Alloy mat loaded from cache: " + sn
-                    + " rq=" + mat.renderQueue + " kws=" + (dict.ContainsKey("keywords") ? dict["keywords"] : ""));
+                Log.LogInfo("[BloodSystem] Bundle loaded: " + _decalSourceMat.shader.name);
             }
-            catch (Exception ex) { Log.LogWarning("[BloodSystem] TryLoadAlloyCache: " + ex.Message); }
-        }
-
-        static void SaveAlloyCacheToFile(Material mat)
-        {
-            try
-            {
-                string kws = string.Join(",", mat.shaderKeywords);
-                var lines = new List<string>
-                {
-                    "shaderName=" + mat.shader.name,
-                    "renderQueue=" + mat.renderQueue,
-                    "keywords="    + kws,
-                };
-                string[] intProps   = { "_SrcBlend", "_DstBlend", "_ZWrite" };
-                string[] floatProps = { "_Mode", "_Cutoff" };
-                foreach (string p in intProps)
-                    if (mat.HasProperty(p)) lines.Add(p + "=" + mat.GetInt(p));
-                foreach (string p in floatProps)
-                    if (mat.HasProperty(p)) lines.Add(p + "=" + mat.GetFloat(p).ToString("F3"));
-                File.WriteAllLines(AlloyMatCachePath, lines.ToArray());
-                Log.LogInfo("[BloodSystem] Alloy mat cache saved: " + mat.shader.name
-                    + " rq=" + mat.renderQueue + " kws=" + kws);
-            }
-            catch (Exception ex) { Log.LogWarning("[BloodSystem] SaveAlloyCache: " + ex.Message); }
+            catch (Exception ex) { Log.LogWarning("[BloodSystem] TryLoadFromBundle: " + ex.Message); }
         }
 
         // ── Shader / material for dot/stain meshes ────────────────────────────────
@@ -476,7 +433,6 @@ namespace BloodSystem
                 _matCache.Clear();
                 Log.LogInfo("[BloodSystem] Alloy mat GRABBED: " + _decalSourceMat.shader.name
                     + " rq=" + _decalSourceMat.renderQueue);
-                SaveAlloyCacheToFile(_decalSourceMat);
             }
             else
             {
