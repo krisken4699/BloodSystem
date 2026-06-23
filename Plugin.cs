@@ -353,35 +353,75 @@ namespace BloodSystem
                     ? _splatterNormals[idx] : new Vector3(0f, 0f, 1f);
         }
 
-        // ── Alloy material from AssetBundle ──────────────────────────────────────
+        // ── Alloy material cache (persists across sessions) ───────────────────────
 
-        static void TryLoadFromBundle()
+        static string AlloyMatCachePath =>
+            Path.Combine(Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location),
+                         "alloy_mat.cache");
+
+        // Reconstruct Alloy/Core from saved keywords + blend state.
+        // The glass-object transparent variant is always compiled in H3VR — Shader.Find picks it up.
+        static void TryLoadFromBundle()  // name kept so Awake call doesn't change
         {
             try
             {
-                string bundlePath = Path.Combine(
-                    Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location),
-                    "bloodsystem");
-                if (!File.Exists(bundlePath))
+                string path = AlloyMatCachePath;
+                if (!File.Exists(path)) return;
+                var dict = new Dictionary<string, string>();
+                foreach (string line in File.ReadAllLines(path))
                 {
-                    Log.LogInfo("[BloodSystem] No bundle found — will grab from scene on first sosig spawn.");
-                    return;
+                    int eq = line.IndexOf('=');
+                    if (eq < 0) continue;
+                    dict[line.Substring(0, eq).Trim()] = line.Substring(eq + 1).Trim();
                 }
-                var bundle = AssetBundle.LoadFromFile(bundlePath);
-                if (ReferenceEquals(bundle, null))
-                { Log.LogWarning("[BloodSystem] AssetBundle.LoadFromFile returned null."); return; }
+                string sn;
+                if (!dict.TryGetValue("shaderName", out sn)) return;
+                Shader sh = Shader.Find(sn);
+                if (ReferenceEquals(sh, null))
+                { Log.LogWarning("[BloodSystem] Cache shader not found: " + sn); return; }
 
-                var mat = bundle.LoadAsset<Material>("BloodDecal");
-                bundle.Unload(false); // keep assets in memory, unload the bundle container
-                if (ReferenceEquals(mat, null))
-                { Log.LogWarning("[BloodSystem] BloodDecal material not found in bundle."); return; }
+                var mat = new Material(sh);
+                string v;
+                if (dict.TryGetValue("renderQueue", out v)) mat.renderQueue = int.Parse(v);
+                if (dict.TryGetValue("_SrcBlend", out v) && mat.HasProperty("_SrcBlend"))
+                    mat.SetInt("_SrcBlend", int.Parse(v));
+                if (dict.TryGetValue("_DstBlend", out v) && mat.HasProperty("_DstBlend"))
+                    mat.SetInt("_DstBlend", int.Parse(v));
+                if (dict.TryGetValue("_ZWrite",   out v) && mat.HasProperty("_ZWrite"))
+                    mat.SetInt("_ZWrite", int.Parse(v));
+                if (dict.TryGetValue("_Mode",     out v) && mat.HasProperty("_Mode"))
+                    mat.SetFloat("_Mode", float.Parse(v));
+                if (dict.TryGetValue("keywords",  out v) && !string.IsNullOrEmpty(v))
+                    foreach (string kw in v.Split(','))
+                        if (!string.IsNullOrEmpty(kw.Trim())) mat.EnableKeyword(kw.Trim());
+                mat.SetInt("_Cull", 0);
 
-                _decalSourceMat = new Material(mat);
-                _decalSourceMat.SetInt("_Cull", 0);
+                _decalSourceMat      = mat;
                 _decalSourceSearched = true;
-                Log.LogInfo("[BloodSystem] Bundle loaded: " + _decalSourceMat.shader.name);
+                Log.LogInfo("[BloodSystem] Cache loaded: " + sn + " rq=" + mat.renderQueue);
             }
-            catch (Exception ex) { Log.LogWarning("[BloodSystem] TryLoadFromBundle: " + ex.Message); }
+            catch (Exception ex) { Log.LogWarning("[BloodSystem] TryLoadFromCache: " + ex.Message); }
+        }
+
+        internal static void SaveAlloyCacheToFile(Material mat)
+        {
+            try
+            {
+                var lines = new List<string>
+                {
+                    "shaderName=" + mat.shader.name,
+                    "renderQueue=" + mat.renderQueue,
+                    "keywords="    + string.Join(",", mat.shaderKeywords),
+                };
+                foreach (string p in new[] { "_SrcBlend", "_DstBlend", "_ZWrite" })
+                    if (mat.HasProperty(p)) lines.Add(p + "=" + mat.GetInt(p));
+                foreach (string p in new[] { "_Mode", "_Cutoff" })
+                    if (mat.HasProperty(p)) lines.Add(p + "=" + mat.GetFloat(p).ToString("F3"));
+                File.WriteAllLines(AlloyMatCachePath, lines.ToArray());
+                Log.LogInfo("[BloodSystem] Cache saved: " + mat.shader.name
+                    + " kws=" + string.Join(",", mat.shaderKeywords));
+            }
+            catch (Exception ex) { Log.LogWarning("[BloodSystem] SaveAlloyCache: " + ex.Message); }
         }
 
         // ── Shader / material for dot/stain meshes ────────────────────────────────
@@ -433,6 +473,7 @@ namespace BloodSystem
                 _matCache.Clear();
                 Log.LogInfo("[BloodSystem] Alloy mat GRABBED: " + _decalSourceMat.shader.name
                     + " rq=" + _decalSourceMat.renderQueue);
+                SaveAlloyCacheToFile(_decalSourceMat);
             }
             else
             {
