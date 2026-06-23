@@ -16,10 +16,15 @@ namespace BloodSystem
     {
         public Vector3 Pos, Norm;
         public float   R;
-        public float   Dark; // 0=bright/white area, 1=dark area — used to darken dot vertex color
-        public DotData(Vector3 pos, Vector3 norm, float r, float dark)
+        public float   Dark;       // 0=bright/white area, 1=dark area
+        public Vector3 TanNorm;    // tangent-space normal from normal map at this sample UV
+        public Vector3 ElongDir;   // bullet direction projected onto hit surface (world space)
+        public float   Elongation; // stretch factor: 1=round, >1=elongated along ElongDir
+        public DotData(Vector3 pos, Vector3 norm, float r, float dark,
+                       Vector3 tanNorm, Vector3 elongDir, float elongation)
         {
             Pos = pos; Norm = norm; R = r; Dark = dark;
+            TanNorm = tanNorm; ElongDir = elongDir; Elongation = elongation;
         }
     }
 
@@ -39,27 +44,39 @@ namespace BloodSystem
         internal static readonly Color _mustardFallback = new Color(0.9f, 0.8f, 0f, 1f);
 
         // Decal material cache: one Material per blood Color — uses _decalTex (soft circle)
-        static readonly Dictionary<Color, Material> _matCache = new Dictionary<Color, Material>();
+        internal static readonly Dictionary<Color, Material> _matCache = new Dictionary<Color, Material>();
         static Shader    _bloodShader;
         static bool      _bloodShaderSearched;
-        static Material  _decalSourceMat;
-        static bool      _decalSourceSearched;
+        internal static Material  _decalSourceMat;
+        internal static bool      _decalSourceSearched;
+        internal static bool      _dbgDotLogged;
+        internal static bool      _dbgDecalLogged;
 
-        // _decalTex  = procedural gaussian soft circle — used for dot mesh quads, drip stain quads, pellet particles
-        // Blood PNGs are used ONLY for CDF ray-direction sampling and fog particle texture
+        // _decalTex  = procedural gaussian soft circle (WHITE) — used with WFX clone (_Color tints it)
+        // Blood PNGs are used ONLY for CDF ray-direction sampling and spray particle texture
         static Texture2D   _decalTex;
-        static Texture2D   _firstBloodTex; // first valid PNG loaded — used as fog particle texture
+        static Texture2D   _firstBloodTex; // first valid PNG loaded — used as spray particle texture
+        static Texture2D   _normalMapTex;  // blood normal map (PNG with "normal"/"norm" in filename)
+        // Per-color pre-baked soft circles — fallback when shader has no _Color tint property
+        static readonly Dictionary<Color, Texture2D> _coloredTexCache = new Dictionary<Color, Texture2D>();
+
 
         // CDF data built from ALL blood PNGs combined (equal-contribution, aspect-correct)
         static Vector2[] _splatterUVs;
         static float[]   _cumWeights;
-        static float[]   _splatterDarks; // per-sample darkness from source pixel luminance
+        static float[]   _splatterDarks;   // per-sample darkness from source pixel luminance
+        static Vector3[] _splatterNormals; // per-sample tangent-space normal from normal map
 
-        // Spray: two persistent PSes
-        static ParticleSystem _pelletPS;   // small round drops — uses soft-circle tex
-        static ParticleSystem _fogPS;      // large puffs — uses first blood PNG
+        // Fixed light direction in texture tangent space for normal-map shading
+        static readonly Vector3 _tanLight = new Vector3(0.5f, 0.5f, 0.707f).normalized;
+
+        // Spray: two persistent PSes (Unlit — scene lighting must not tint brief spray)
+        static ParticleSystem _pelletPS;
+        static ParticleSystem _fogPS;
         static Material       _fogMat;
         static Material       _pelletMat;
+        // Dot mesh base material: Particles/Standard Lit + soft circle (scene-lit for persistent stains)
+        static Material       _dotBaseMat;
 
         // NGA SosigIntegrityConfigs color (one-time check)
         static bool  _ngaChecked;
@@ -77,13 +94,26 @@ namespace BloodSystem
 
             CfgEnabled   = Config.Bind("Blood", "Enabled",          true,   "Toggle all blood effects.");
             CfgLifetime  = Config.Bind("Blood", "Lifetime seconds",  30f,    "How long splash and drip stains last before despawning.");
-            CfgRayCount  = Config.Bind("Blood", "Rays per shot",     300,    "Splash ray count. Around 1500 was confirmed fine in testing; 300 is a safe default.");
+            CfgRayCount  = Config.Bind("Blood", "Rays per shot",     2000,   "Splash ray count. Around 1500 was confirmed fine in testing; 2000 is the default.");
             CfgConeAngle = Config.Bind("Blood", "Cone half-angle",   10f,    "Half-angle in degrees of the splash cone.");
-            CfgDotSize   = Config.Bind("Blood", "Dot base radius",   0.004f, "Base radius of each splash dot in metres. Scales linearly to 3x at 20 metres.");
-            CfgRange     = Config.Bind("Blood", "Range metres",      15f,    "Maximum splash distance in metres.");
+            CfgDotSize   = Config.Bind("Blood", "Dot base radius",   0.008f, "Base radius of each splash dot in metres. Scales linearly to 3x at 20 metres.");
+            CfgRange     = Config.Bind("Blood", "Range metres",      50f,    "Maximum splash distance in metres.");
 
             // Soft-circle decal texture — all dot/stain rendering uses this (NOT the blood PNGs)
             _decalTex = MakeSoftCircle(96);
+
+            // Dot base material: Sprites/Default — always compiled in any Unity build,
+            // alpha-blends correctly, and reads mesh.colors (vertex colors) so per-dot
+            // normal-map shading (darkMult, shadeMult) is actually visible.
+            {
+                Shader ds = Shader.Find("Sprites/Default");
+                if (!ReferenceEquals(ds, null))
+                {
+                    _dotBaseMat = new Material(ds);
+                    _dotBaseMat.mainTexture = _decalTex;
+                    // Sprites/Default has Cull Off and premul-alpha blend hardcoded — no extra setup needed.
+                }
+            }
 
             // Load ALL blood PNGs and build combined CDF
             var allTextures = LoadAllPngs();
@@ -100,12 +130,12 @@ namespace BloodSystem
                 Log.LogWarning("[BloodSystem] No PNG found in plugin folder — using uniform fallback grid.");
             }
 
-            _fogMat    = BuildFogMaterial();
-            _pelletMat = BuildPelletMaterial();
+            _fogMat    = BuildSprayMaterial();
+            _pelletMat = BuildSprayMaterial();
             BuildSprayPSes();
 
             new Harmony("h3vr.invent60.bloodsystem").PatchAll(typeof(BloodSystemPatches));
-            Log.LogInfo("[BloodSystem] 3.0.0 loaded.");
+            Log.LogInfo("[BloodSystem] 3.0.0 loaded. FieldsOK=" + BloodSystemPatches.Ok);
         }
 
         // ── PNG loading ───────────────────────────────────────────────────────────
@@ -116,18 +146,40 @@ namespace BloodSystem
             try
             {
                 string dir = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
-                foreach (string f in Directory.GetFiles(dir, "*.png"))
+                var files = new List<string>(Directory.GetFiles(dir, "*.png"));
+                files.AddRange(Directory.GetFiles(dir, "*.jpg"));
+                files.AddRange(Directory.GetFiles(dir, "*.jpeg"));
+                foreach (string f in files)
                 {
                     var t = new Texture2D(2, 2, TextureFormat.RGBA32, false);
-                    if (t.LoadImage(File.ReadAllBytes(f)))
+                    if (!t.LoadImage(File.ReadAllBytes(f))) continue;
+                    t.filterMode = FilterMode.Trilinear;
+                    string fname = Path.GetFileNameWithoutExtension(f).ToLower();
+                    if (fname.Contains("normal") || fname.Contains("norm"))
                     {
-                        t.filterMode = FilterMode.Trilinear;
+                        _normalMapTex = t;
+                        Log.LogInfo("[BloodSystem] NormalMap=" + Path.GetFileName(f));
+                    }
+                    else
+                    {
                         result.Add(t);
                     }
                 }
             }
             catch (Exception ex) { BloodSystemPlugin.Log.LogWarning("[BloodSystem] LoadAllPngs: " + ex.Message); }
             return result;
+        }
+
+        // Decode tangent-space normal from _normalMapTex at a [-1,1] UV. Returns (0,0,1) if no map.
+        static Vector3 LookupNormal(Vector2 uv)
+        {
+            if (ReferenceEquals(_normalMapTex, null)) return new Vector3(0f, 0f, 1f);
+            float u  = uv.x * 0.5f + 0.5f;
+            float v  = uv.y * 0.5f + 0.5f;
+            int   px = Mathf.Clamp(Mathf.RoundToInt(u * (_normalMapTex.width  - 1)), 0, _normalMapTex.width  - 1);
+            int   py = Mathf.Clamp(Mathf.RoundToInt(v * (_normalMapTex.height - 1)), 0, _normalMapTex.height - 1);
+            Color c  = _normalMapTex.GetPixel(px, py);
+            return new Vector3(c.r * 2f - 1f, c.g * 2f - 1f, Mathf.Abs(c.b * 2f - 1f)).normalized;
         }
 
         // Procedural gaussian soft-circle 64×64: white center, alpha falls to 0 at edge.
@@ -151,6 +203,29 @@ namespace BloodSystem
             return tex;
         }
 
+        // Pre-bake a blood-colored soft circle per color — used for shaders without _Color tint.
+        static Texture2D GetColoredTex(Color col)
+        {
+            Texture2D t;
+            if (_coloredTexCache.TryGetValue(col, out t) && !ReferenceEquals(t, null)) return t;
+            int sz = 96;
+            t = new Texture2D(sz, sz, TextureFormat.RGBA32, false);
+            float c = (sz - 1) * 0.5f;
+            var pix = new Color[sz * sz];
+            for (int y = 0; y < sz; y++)
+            for (int x = 0; x < sz; x++)
+            {
+                float dx = (x - c) / c, dy = (y - c) / c;
+                float d2 = dx*dx + dy*dy;
+                float a = d2 > 1f ? 0f : Mathf.Clamp01(Mathf.Exp(-d2 * 3.5f));
+                pix[y*sz+x] = new Color(col.r, col.g, col.b, a);
+            }
+            t.SetPixels(pix); t.Apply();
+            t.filterMode = FilterMode.Trilinear;
+            _coloredTexCache[col] = t;
+            return t;
+        }
+
         // ── CDF build from multiple blood PNGs ────────────────────────────────────
         //
         // Each image contributes equally regardless of resolution or overall brightness.
@@ -161,6 +236,7 @@ namespace BloodSystem
         {
             var uvList   = new List<Vector2>();
             var darkList = new List<float>();
+            var normList = new List<Vector3>();
             var wList    = new List<float>();
             float cumul  = 0f;
 
@@ -212,38 +288,46 @@ namespace BloodSystem
                     cumul += imgWts[i] * norm;
                     uvList.Add(imgUVs[i]);
                     darkList.Add(imgDarks[i]);
+                    normList.Add(LookupNormal(imgUVs[i]));
                     wList.Add(cumul);
                 }
             }
 
-            _splatterUVs   = uvList.ToArray();
-            _splatterDarks = darkList.ToArray();
-            _cumWeights    = wList.ToArray();
+            _splatterUVs     = uvList.ToArray();
+            _splatterDarks   = darkList.ToArray();
+            _splatterNormals = normList.ToArray();
+            _cumWeights      = wList.ToArray();
         }
 
         static void BuildFallbackGrid(int side)
         {
             var uvList   = new List<Vector2>(side * side);
             var darkList = new List<float>(side * side);
+            var normList = new List<Vector3>(side * side);
+            var flatNorm = new Vector3(0f, 0f, 1f);
             for (int y = 0; y < side; y++)
             for (int x = 0; x < side; x++)
             {
-                uvList.Add(new Vector2(((float)x / (side - 1)) * 2f - 1f,
-                                       ((float)y / (side - 1)) * 2f - 1f));
+                var uv = new Vector2(((float)x / (side - 1)) * 2f - 1f,
+                                     ((float)y / (side - 1)) * 2f - 1f);
+                uvList.Add(uv);
                 darkList.Add(0.8f);
+                normList.Add(LookupNormal(uv));
             }
-            _splatterUVs   = uvList.ToArray();
-            _splatterDarks = darkList.ToArray();
-            _cumWeights    = new float[0];
+            _splatterUVs     = uvList.ToArray();
+            _splatterDarks   = darkList.ToArray();
+            _splatterNormals = normList.ToArray();
+            _cumWeights      = new float[0];
         }
 
-        // O(log n) binary search on CDF → returns UV + darkness at that sample
-        static void SampleSplatter(out Vector2 uv, out float dark)
+        // O(log n) binary search on CDF → returns UV + darkness + tangent normal at that sample
+        static void SampleSplatter(out Vector2 uv, out float dark, out Vector3 tanNorm)
         {
             if (_splatterUVs == null || _splatterUVs.Length == 0)
             {
-                uv   = new Vector2(UnityEngine.Random.Range(-1f, 1f), UnityEngine.Random.Range(-1f, 1f));
-                dark = 0.8f;
+                uv      = new Vector2(UnityEngine.Random.Range(-1f, 1f), UnityEngine.Random.Range(-1f, 1f));
+                dark    = 0.8f;
+                tanNorm = new Vector3(0f, 0f, 1f);
                 return;
             }
             int idx;
@@ -258,224 +342,82 @@ namespace BloodSystem
                 while (lo < hi) { int mid = (lo + hi) >> 1; if (_cumWeights[mid] < r) lo = mid + 1; else hi = mid; }
                 idx = lo;
             }
-            uv   = _splatterUVs[idx];
-            dark = (!ReferenceEquals(_splatterDarks, null) && idx < _splatterDarks.Length)
-                 ? _splatterDarks[idx] : 0.8f;
+            uv      = _splatterUVs[idx];
+            dark    = (!ReferenceEquals(_splatterDarks,   null) && idx < _splatterDarks.Length)
+                    ? _splatterDarks[idx]   : 0.8f;
+            tanNorm = (!ReferenceEquals(_splatterNormals, null) && idx < _splatterNormals.Length)
+                    ? _splatterNormals[idx] : new Vector3(0f, 0f, 1f);
         }
 
         // ── Shader / material for dot/stain meshes ────────────────────────────────
 
-        // Alloy shader found at runtime (if any) — cached after first search
-        static Shader _alloyShader;
-        static bool   _alloyShaderSearched;
+        internal static bool _alloyGrabPending;
 
-        static Shader FindAlloyShader()
+        // Scan ALL renderers in scene for best Alloy transparent material.
+        // Priority: Alloy/Core rq>2000 > other non-additive Alloy rq>2000 > Alloy/Core opaque.
+        // Additive shaders excluded — additive blend on static mesh = glow, not blood.
+        internal static IEnumerator TryGrabAlloyFromScene()
         {
-            if (_alloyShaderSearched) return _alloyShader;
-            _alloyShaderSearched = true;
-            string[] candidates = { "Alloy/Core", "Alloy Mods/Masked Core", "Alloy/Unlit",
-                                    "Alloy/Triplanar", "Alloy Mods/Triplanar" };
-            foreach (string name in candidates)
-            {
-                Shader s = Shader.Find(name);
-                if (!ReferenceEquals(s, null))
-                {
-                    _alloyShader = s;
-                    Log.LogInfo("[BloodSystem] alloyShader=" + name);
-                    return s;
-                }
-            }
-            Log.LogInfo("[BloodSystem] No Alloy shader found via Shader.Find.");
-            return null;
-        }
+            _alloyGrabPending = true;
+            yield return null; // wait 1 frame for WFX decal to instantiate
 
-        static Shader FindBloodShader()
-        {
-            if (_bloodShaderSearched) return _bloodShader;
-            _bloodShaderSearched = true;
-            // Alloy first (correct PBR), then simpler fallbacks
-            Shader alloy = FindAlloyShader();
-            if (!ReferenceEquals(alloy, null)) { _bloodShader = alloy; return alloy; }
+            if (!ReferenceEquals(_decalSourceMat, null)) { _alloyGrabPending = false; yield break; }
 
-            // Standard is always in Unity — its _ALPHABLEND_ON variant is guaranteed compiled
-            string[] fallbacks = { "Standard", "Transparent/Specular", "Unlit/Transparent",
-                                   "Transparent/Diffuse",  "Sprites/Default" };
-            foreach (string name in fallbacks)
-            {
-                Shader s = Shader.Find(name);
-                if (!ReferenceEquals(s, null))
-                {
-                    _bloodShader = s;
-                    Log.LogInfo("[BloodSystem] decalShaderFallback=" + name);
-                    return s;
-                }
-            }
-            Log.LogWarning("[BloodSystem] No decal shader found — dots will be invisible.");
-            return null;
-        }
-
-        // Scan all scene renderers for a transparent Alloy material (glass, lenses, etc.)
-        // and clone it. That material already has the correct transparent shader variant compiled.
-        static void TryGrabDecalSourceMat()
-        {
-            if (_decalSourceSearched) return;
-            _decalSourceSearched = true;
-
-            // 1 — WFX_BulletHoleDecal (any shader, proven to work as a decal)
+            Renderer bestR = null; int bestScore = -1; int alloyCount = 0;
             try
             {
-                Type bhType = AccessTools.TypeByName("WFX_BulletHoleDecal");
-                if (!ReferenceEquals(bhType, null))
+                foreach (var r in UnityEngine.Object.FindObjectsOfType<Renderer>())
                 {
-                    foreach (UnityEngine.Object obj in UnityEngine.Object.FindObjectsOfType(bhType))
-                    {
-                        var comp = obj as Component;
-                        if (ReferenceEquals(comp, null)) continue;
-                        var r = comp.GetComponent<Renderer>();
-                        if (ReferenceEquals(r, null) || ReferenceEquals(r.sharedMaterial, null)) continue;
-                        _decalSourceMat = new Material(r.sharedMaterial);
-                        _decalSourceMat.SetInt("_Cull", 0);
-                        Log.LogInfo("[BloodSystem] WFXShader=" + _decalSourceMat.shader.name
-                                    + " queue=" + _decalSourceMat.renderQueue);
-                        return;
-                    }
+                    if (ReferenceEquals(r, null)) continue;
+                    var mat = r.sharedMaterial;
+                    if (ReferenceEquals(mat, null) || ReferenceEquals(mat.shader, null)) continue;
+                    string sn = mat.shader.name;
+                    if (sn.IndexOf("Alloy", System.StringComparison.OrdinalIgnoreCase) < 0) continue;
+                    // Exclude additive shaders: additive blend on mesh = glow, not blood.
+                    if (sn.IndexOf("Additive", System.StringComparison.OrdinalIgnoreCase) >= 0) continue;
+                    alloyCount++;
+
+                    // Score: prefer Alloy/Core > other Alloy, prefer transparent (rq>2000) > opaque.
+                    int score = 0;
+                    if (sn == "Alloy/Core") score += 100;
+                    if (mat.renderQueue > 2000) score += 50;
+                    Log.LogInfo("[BloodSystem] Alloy candidate: shader=" + sn
+                        + " rq=" + mat.renderQueue + " score=" + score + " obj=" + r.gameObject.name);
+                    if (score > bestScore) { bestScore = score; bestR = r; }
                 }
             }
-            catch (Exception ex) { Log.LogWarning("[BloodSystem] TryGrabDecal WFX: " + ex.Message); }
+            catch (Exception ex) { Log.LogWarning("[BloodSystem] TryGrabAlloyFromScene: " + ex.Message); }
 
-            // 2 — Transparent/Specular: Unity built-in legacy shader, always in every Unity build.
-            // Alpha from mainTex.a (soft circle) + Blinn-Phong specular (wet/shiny look).
-            // Responds to scene lighting → dark in shadows, lit under flashlight. No glow.
-            // Preferred over Alloy because both Alloy blend variants (_ALPHABLEND_ON and
-            // _ALPHAPREMULTIPLY_ON) are NOT compiled in H3VR — confirmed squares in both cases.
-            // Only Alloy _ALPHATEST_ON (cutout) works but gives hard edges.
-            try
+            Log.LogInfo("[BloodSystem] AlloyGrab: candidates=" + alloyCount + " bestScore=" + bestScore);
+
+            if (!ReferenceEquals(bestR, null))
             {
-                Shader ts = Shader.Find("Transparent/Specular");
-                if (!ReferenceEquals(ts, null))
-                {
-                    _decalSourceMat = new Material(ts);
-                    _decalSourceMat.renderQueue = 3000;
-                    _decalSourceMat.SetInt("_Cull", 0);
-                    Log.LogInfo("[BloodSystem] TransparentSpecularSrc");
-                }
-                else Log.LogWarning("[BloodSystem] Transparent/Specular not in build.");
+                _decalSourceMat = new Material(bestR.sharedMaterial);
+                _decalSourceMat.SetInt("_Cull", 0);
+                _decalSourceSearched = true;
+                _matCache.Clear();
+                Log.LogInfo("[BloodSystem] Alloy mat GRABBED: " + _decalSourceMat.shader.name
+                    + " rq=" + _decalSourceMat.renderQueue);
             }
-            catch (Exception ex) { Log.LogWarning("[BloodSystem] TryGrabDecal TranspSpec: " + ex.Message); }
-
-            // 3 — Standard shader fade mode: Unity always includes this (pink fallback shader).
-            // _ALPHABLEND_ON variant is compiled in every Unity build.
-            // mainTexture alpha = our gaussian soft circle → actual soft edges.
-            if (ReferenceEquals(_decalSourceMat, null))
+            else
             {
-                try
-                {
-                    Shader std = Shader.Find("Standard");
-                    if (!ReferenceEquals(std, null))
-                    {
-                        var stdMat = new Material(std);
-                        stdMat.SetFloat("_Mode",    2f);  // Fade
-                        stdMat.EnableKeyword("_ALPHABLEND_ON");
-                        stdMat.DisableKeyword("_ALPHATEST_ON");
-                        stdMat.DisableKeyword("_ALPHAPREMULTIPLY_ON");
-                        stdMat.SetInt("_SrcBlend", 5);    // SrcAlpha
-                        stdMat.SetInt("_DstBlend", 10);   // OneMinusSrcAlpha
-                        stdMat.SetInt("_ZWrite",   0);
-                        stdMat.renderQueue = 3000;
-                        stdMat.SetInt("_Cull",     0);
-                        _decalSourceMat = stdMat;
-                        Log.LogInfo("[BloodSystem] StandardFadeSrc");
-                    }
-                    else Log.LogWarning("[BloodSystem] Standard not in build.");
-                }
-                catch (Exception ex) { Log.LogWarning("[BloodSystem] TryGrabDecal Standard: " + ex.Message); }
+                Log.LogWarning("[BloodSystem] No Alloy renderer found — shoot a wall, then a sosig.");
             }
-
-            // 4 — Alloy _ALPHATEST_ON fallback: hard circle edges but full Alloy PBR reflectiveness.
-            // Only used if Standard also missing (shouldn't happen in any Unity build).
-            if (ReferenceEquals(_decalSourceMat, null))
-            {
-                try
-                {
-                    foreach (var rend in UnityEngine.Object.FindObjectsOfType<Renderer>())
-                    {
-                        foreach (var mat in rend.sharedMaterials)
-                        {
-                            if (ReferenceEquals(mat, null) || ReferenceEquals(mat.shader, null)) continue;
-                            string sn = mat.shader.name;
-                            if (!sn.StartsWith("Alloy")) continue;
-                            if (sn.Contains("Particle") || sn.Contains("Add") || sn.Contains("Unlit")) continue;
-                            if (!mat.HasProperty("_Roughness")) continue;
-
-                            var alloyMat = new Material(mat.shader);
-                            alloyMat.EnableKeyword("_ALPHATEST_ON");
-                            alloyMat.DisableKeyword("_ALPHABLEND_ON");
-                            alloyMat.DisableKeyword("_ALPHAPREMULTIPLY_ON");
-                            alloyMat.SetFloat("_Mode",   1f);
-                            alloyMat.SetFloat("_Cutoff", 0.05f);
-                            alloyMat.SetInt("_SrcBlend", 1);
-                            alloyMat.SetInt("_DstBlend", 0);
-                            alloyMat.SetFloat("_ZWrite", 1f);
-                            alloyMat.renderQueue = 2450;
-                            alloyMat.SetInt("_Cull", 0);
-                            _decalSourceMat = alloyMat;
-                            Log.LogInfo("[BloodSystem] AlloyCutoutFallback=" + sn);
-                            goto doneAlloyScan;
-                        }
-                    }
-                    doneAlloyScan:;
-                }
-                catch (Exception ex) { Log.LogWarning("[BloodSystem] TryGrabDecal Alloy: " + ex.Message); }
-            }
+            _alloyGrabPending = false;
         }
 
-        // Returns a cached material using _decalTex (soft gaussian circle).
-        // Priority: (1) cloned transparent scene material — Alloy or WFX, already working
-        //           (2) runtime Alloy + keyword activation for transparency
-        //           (3) Transparent/Specular / Unlit / Diffuse fallbacks
+        // Returns cached Alloy material. Returns null (no dots) until Alloy is grabbed via wall hit.
         internal static Material GetBloodMat(Color col)
         {
             Material m;
             if (_matCache.TryGetValue(col, out m) && !ReferenceEquals(m, null)) return m;
 
-            // --- Path 1: clone an existing transparent material from scene ---
-            if (ReferenceEquals(_decalSourceMat, null)) { _decalSourceSearched = false; TryGrabDecalSourceMat(); }
-            if (!ReferenceEquals(_decalSourceMat, null))
-            {
-                m = new Material(_decalSourceMat);
-                if (!ReferenceEquals(_decalTex, null)) m.mainTexture = _decalTex;
-                ApplyBloodProps(m, col);
-                _matCache[col] = m;
-                return m;
-            }
+            if (ReferenceEquals(_decalSourceMat, null))
+                return null; // invisible until Alloy grabbed
 
-            // --- Path 2: build from shader ---
-            Shader sh = FindBloodShader();
-            if (ReferenceEquals(sh, null)) return null;
-
-            m = new Material(sh);
+            m = new Material(_decalSourceMat);
             if (!ReferenceEquals(_decalTex, null)) m.mainTexture = _decalTex;
-
-            if (sh.name.StartsWith("Alloy"))
-            {
-                m.EnableKeyword("_ALPHATEST_ON");
-                m.DisableKeyword("_ALPHABLEND_ON");
-                m.DisableKeyword("_ALPHAPREMULTIPLY_ON");
-                m.SetFloat("_Mode",   1f);
-                m.SetFloat("_Cutoff", 0.05f);
-                m.SetInt("_SrcBlend", 1);
-                m.SetInt("_DstBlend", 0);
-                m.SetFloat("_ZWrite", 1f);
-                m.renderQueue = 2450;
-            }
-            else
-            {
-                m.renderQueue = 3000;
-            }
-
             ApplyBloodProps(m, col);
-            m.SetInt("_Cull", 0);
-
             _matCache[col] = m;
             return m;
         }
@@ -506,33 +448,15 @@ namespace BloodSystem
 
         // ── Spray materials ───────────────────────────────────────────────────────
 
-        static Material BuildFogMaterial()
+        // Spray: Sprites/Default — always in any Unity build, alpha-blends, reads vertex (particle) color.
+        static Material BuildSprayMaterial()
         {
-            Shader sh = Shader.Find("Particles/Standard Lit");
-            bool   lit = !ReferenceEquals(sh, null);
-            if (!lit) sh = Shader.Find("Particles/Standard Unlit");
+            Shader sh = Shader.Find("Sprites/Default");
             if (ReferenceEquals(sh, null)) sh = Shader.Find("Particles/Additive");
-            if (ReferenceEquals(sh, null)) sh = Shader.Find("Sprites/Default");
             if (ReferenceEquals(sh, null)) return null;
             var mat = new Material(sh);
-            if (lit) SetParticleFadeMode(mat);
-            // Fog uses the blood splatter PNG so puffs have the splatter shape
+            // Sprites/Default has its own premul-alpha blend — no SetParticleFadeMode needed.
             if (!ReferenceEquals(_firstBloodTex, null)) mat.mainTexture = _firstBloodTex;
-            return mat;
-        }
-
-        static Material BuildPelletMaterial()
-        {
-            Shader sh = Shader.Find("Particles/Standard Lit");
-            bool   lit = !ReferenceEquals(sh, null);
-            if (!lit) sh = Shader.Find("Particles/Standard Unlit");
-            if (ReferenceEquals(sh, null)) sh = Shader.Find("Particles/Additive");
-            if (ReferenceEquals(sh, null)) sh = Shader.Find("Sprites/Default");
-            if (ReferenceEquals(sh, null)) return null;
-            var mat = new Material(sh);
-            if (lit) SetParticleFadeMode(mat);
-            // Pellets use soft circle so individual drops are round
-            if (!ReferenceEquals(_decalTex, null)) mat.mainTexture = _decalTex;
             return mat;
         }
 
@@ -551,7 +475,14 @@ namespace BloodSystem
 
         void BuildSprayPSes()
         {
-            // Pellet PS: tight fast round drops
+            var fadeGrad = new Gradient();
+            fadeGrad.SetKeys(
+                new GradientColorKey[] { new GradientColorKey(Color.white, 0f),
+                                         new GradientColorKey(Color.white, 1f) },
+                new GradientAlphaKey[] { new GradientAlphaKey(1.0f, 0f),
+                                         new GradientAlphaKey(0f,   1f) });
+
+            // Pellet PS: small blood-texture blobs
             {
                 var go = new GameObject("BSPellet");
                 DontDestroyOnLoad(go);
@@ -559,10 +490,11 @@ namespace BloodSystem
                 _pelletPS = go.AddComponent<ParticleSystem>();
                 var mn = _pelletPS.main;
                 mn.startLifetime   = new ParticleSystem.MinMaxCurve(0.3f, 0.5f);
-                mn.startSpeed      = new ParticleSystem.MinMaxCurve(4f, 20f);
-                mn.startSize       = new ParticleSystem.MinMaxCurve(0.003f, 0.012f);
-                mn.maxParticles    = 3000;
-                mn.gravityModifier = 1.8f;
+                mn.startSpeed      = new ParticleSystem.MinMaxCurve(0.5f, 2.5f);
+                mn.startSize       = new ParticleSystem.MinMaxCurve(0.02f, 0.08f);
+                mn.startRotation   = new ParticleSystem.MinMaxCurve(0f, Mathf.PI * 2f);
+                mn.maxParticles    = 2000;
+                mn.gravityModifier = 0f;
                 mn.loop            = false;
                 mn.playOnAwake     = false;
                 mn.duration        = 0.5f;
@@ -573,20 +505,17 @@ namespace BloodSystem
                 var sh = _pelletPS.shape;
                 sh.enabled   = true;
                 sh.shapeType = ParticleSystemShapeType.Cone;
-                sh.angle     = 28f;
+                sh.angle     = 15f;  // 30° total cone
                 sh.radius    = 0.02f;
+                var col = _pelletPS.colorOverLifetime;
+                col.enabled = true;
+                col.color   = new ParticleSystem.MinMaxGradient(fadeGrad);
                 var psr = _pelletPS.GetComponent<ParticleSystemRenderer>();
-                if (psr != null)
-                {
-                    if (!ReferenceEquals(_pelletMat, null)) psr.material = _pelletMat;
-                    psr.renderMode    = (ParticleSystemRenderMode)1; // 1 = Stretch/StretchedBillboard
-                    psr.velocityScale = 0.06f; // stretch proportional to speed
-                    psr.lengthScale   = 3f;    // base elongation so drops look stretched even when slow
-                }
+                if (psr != null && !ReferenceEquals(_pelletMat, null)) psr.material = _pelletMat;
                 go.SetActive(true);
             }
 
-            // Fog PS: large slow dense puffs
+            // Fog PS: large blood-texture blobs
             {
                 var go = new GameObject("BSFog");
                 DontDestroyOnLoad(go);
@@ -594,11 +523,11 @@ namespace BloodSystem
                 _fogPS = go.AddComponent<ParticleSystem>();
                 var mn = _fogPS.main;
                 mn.startLifetime   = new ParticleSystem.MinMaxCurve(0.3f, 0.5f);
-                mn.startSpeed      = new ParticleSystem.MinMaxCurve(1f, 5f);
-                mn.startSize       = new ParticleSystem.MinMaxCurve(0.10f, 0.35f); // larger than before for density
-                mn.startRotation   = new ParticleSystem.MinMaxCurve(-Mathf.PI, Mathf.PI);
+                mn.startSpeed      = new ParticleSystem.MinMaxCurve(0.5f, 2.5f);
+                mn.startSize       = new ParticleSystem.MinMaxCurve(0.07f, 0.22f);
+                mn.startRotation   = new ParticleSystem.MinMaxCurve(0f, Mathf.PI * 2f);
                 mn.maxParticles    = 1000;
-                mn.gravityModifier = new ParticleSystem.MinMaxCurve(0.5f, 1.0f);
+                mn.gravityModifier = 0f;
                 mn.loop            = false;
                 mn.playOnAwake     = false;
                 mn.duration        = 0.5f;
@@ -609,20 +538,11 @@ namespace BloodSystem
                 var sh = _fogPS.shape;
                 sh.enabled   = true;
                 sh.shapeType = ParticleSystemShapeType.Cone;
-                sh.angle     = 18f;
+                sh.angle     = 15f;  // 30° total cone
                 sh.radius    = 0.03f;
                 var col = _fogPS.colorOverLifetime;
                 col.enabled = true;
-                var grad = new Gradient();
-                grad.SetKeys(
-                    new GradientColorKey[] { new GradientColorKey(Color.white, 0f),
-                                            new GradientColorKey(Color.white, 1f) },
-                    new GradientAlphaKey[] { new GradientAlphaKey(1f, 0f),
-                                            new GradientAlphaKey(0f, 1f) });
-                col.color = new ParticleSystem.MinMaxGradient(grad);
-                var rot = _fogPS.rotationOverLifetime;
-                rot.enabled = true;
-                rot.z       = new ParticleSystem.MinMaxCurve(-1f, 1f);
+                col.color   = new ParticleSystem.MinMaxGradient(fadeGrad);
                 var psr = _fogPS.GetComponent<ParticleSystemRenderer>();
                 if (psr != null && !ReferenceEquals(_fogMat, null)) psr.material = _fogMat;
                 go.SetActive(true);
@@ -663,8 +583,8 @@ namespace BloodSystem
 
                 for (int i = 0; i < N; i++)
                 {
-                    Vector2 uv; float dark;
-                    SampleSplatter(out uv, out dark);
+                    Vector2 uv; float dark; Vector3 tanNorm;
+                    SampleSplatter(out uv, out dark, out tanNorm);
 
                     Vector3 dir = (fwd + right * uv.x * tanHalf + up * uv.y * tanHalf).normalized;
 
@@ -677,9 +597,17 @@ namespace BloodSystem
                     float dotR = CfgDotSize.Value * Mathf.Clamp(1f + h.distance / 10f, 1f, 3f);
                     int   bin  = Mathf.FloorToInt(h.distance / projSpeed / BIN_S);
 
+                    // Elongation: blood hitting at a glancing angle streaks in the travel direction.
+                    // sinAngle = |dot(rayDir, surfaceNormal)| → 1=perpendicular (round), ~0=grazing (very long).
+                    float sinAngle  = Mathf.Abs(Vector3.Dot(dir, h.normal));
+                    float elong     = Mathf.Clamp(1f / Mathf.Max(0.15f, sinAngle), 1f, 8f);
+                    Vector3 elongVec = dir - Vector3.Dot(dir, h.normal) * h.normal; // project onto surface
+                    if (elongVec.sqrMagnitude > 0.001f) elongVec.Normalize();
+                    else elongVec = right; // perfectly perpendicular: fallback (round anyway)
+
                     Rigidbody hitRb = h.collider.attachedRigidbody;
                     Transform par   = hitRb != null ? hitRb.transform : null;
-                    var dd = new DotData(h.point, h.normal, dotR, dark);
+                    var dd = new DotData(h.point, h.normal, dotR, dark, tanNorm, elongVec, elong);
 
                     if (par == null)
                     {
@@ -695,6 +623,10 @@ namespace BloodSystem
                 }
 
                 if (staticBins.Count == 0 && dynBins.Count == 0) return;
+                int _dbgHits = 0;
+                foreach (var _kv in staticBins) _dbgHits += _kv.Value.Count;
+                foreach (var _kv in dynBins) foreach (var _kv2 in _kv.Value) _dbgHits += _kv2.Value.Count;
+                Log.LogInfo("[BloodSystem] Projection: " + _dbgHits + " hits, " + (staticBins.Count + dynBins.Count) + " bins");
                 _instance.StartCoroutine(DoDelayedSpawn(staticBins, dynBins, col, BIN_S));
             }
             catch (Exception ex) { Log.LogError("[BloodSystem] SpawnProjection: " + ex); }
@@ -740,16 +672,16 @@ namespace BloodSystem
                 _pelletPS.transform.position = pos;
                 _pelletPS.transform.rotation = rot;
                 var mn = _pelletPS.main;
-                mn.startColor = new ParticleSystem.MinMaxGradient(col);
-                _pelletPS.Emit(400);
+                mn.startColor = new ParticleSystem.MinMaxGradient(new Color(col.r * 0.85f, col.g * 0.85f, col.b * 0.85f, 1f));
+                _pelletPS.Emit(250);
             }
             if (!ReferenceEquals(_fogPS, null))
             {
                 _fogPS.transform.position = pos;
                 _fogPS.transform.rotation = rot;
                 var mn = _fogPS.main;
-                mn.startColor = new ParticleSystem.MinMaxGradient(new Color(col.r, col.g, col.b, 0.75f));
-                _fogPS.Emit(80); // increased from 30 for denser fog cloud
+                mn.startColor = new ParticleSystem.MinMaxGradient(new Color(col.r * 0.85f, col.g * 0.85f, col.b * 0.85f, 1f));
+                _fogPS.Emit(100);
             }
         }
 
@@ -774,7 +706,7 @@ namespace BloodSystem
             mesh.uv        = new[] { new Vector2(0,0), new Vector2(1,0),
                                      new Vector2(1,1), new Vector2(0,1) };
             mesh.colors    = new[] { col, col, col, col };
-            mesh.triangles = new[] { 0, 3, 2, 0, 2, 1 };
+            mesh.triangles = new[] { 0, 2, 3, 0, 1, 2 };
             mesh.RecalculateBounds();
             mesh.RecalculateNormals();
 
@@ -793,6 +725,7 @@ namespace BloodSystem
         {
             if (dots.Count == 0) return;
             Material mat = GetBloodMat(col);
+            Log.LogInfo("[BloodSystem] BuildDotMesh " + dots.Count + " mat=" + (!ReferenceEquals(mat, null) ? mat.shader.name : "NULL"));
             if (ReferenceEquals(mat, null)) return;
 
             const int MAX = 16383; // 4 verts × 16383 = 65532 < 65535 index limit
@@ -810,12 +743,22 @@ namespace BloodSystem
                     DotData d    = dots[start + i];
                     Vector3 norm = d.Norm;
                     float   r    = d.R;
-                    Vector3 qup  = Mathf.Abs(Vector3.Dot(norm, Vector3.up)) > 0.9f
-                                 ? Vector3.forward : Vector3.up;
-                    Quaternion rot = Quaternion.LookRotation(-norm, qup)
-                                   * Quaternion.Euler(0f, 0f, UnityEngine.Random.Range(0f, 360f));
-                    Vector3 qr = rot * Vector3.right * r;
-                    Vector3 qu = rot * Vector3.up    * r;
+
+                    // Orient quad: elongation direction = surface-projected bullet path.
+                    // Perpendicular direction = cross(norm, elongDir).
+                    // For near-perpendicular shots elongation≈1 so the roll is irrelevant.
+                    Vector3 elongDir = d.ElongDir;
+                    Vector3 perpDir  = Vector3.Cross(norm, elongDir);
+                    if (perpDir.sqrMagnitude < 0.001f)
+                    {
+                        Vector3 qup2 = Mathf.Abs(Vector3.Dot(norm, Vector3.up)) > 0.9f
+                                     ? Vector3.forward : Vector3.up;
+                        perpDir = Vector3.Cross(norm, qup2);
+                    }
+                    perpDir.Normalize();
+
+                    Vector3 qr = elongDir * (r * d.Elongation); // stretched in bullet direction
+                    Vector3 qu = perpDir  * r;                   // width unchanged
                     Vector3 bp = d.Pos + norm * 0.003f;
 
                     Vector3 c0 = bp-qr-qu, c1 = bp+qr-qu, c2 = bp+qr+qu, c3 = bp-qr+qu;
@@ -828,9 +771,17 @@ namespace BloodSystem
                     }
 
                     // Per-dot darkness: dark pixels in source image → darker dot color
-                    // darkMult: range 0.4 (light pixels) to 1.0 (dark/dense pixels)
                     float darkMult = Mathf.Lerp(0.4f, 1.0f, d.Dark);
-                    Color vc = new Color(col.r * darkMult, col.g * darkMult, col.b * darkMult, 1f);
+
+                    // Per-dot normal-map shading: tangent-space normal from blood normal map
+                    // gives each dot a unique brightness based on its position in the splatter pattern.
+                    // Together all dots read as a 3D surface with ridges and depth.
+                    float tanShade  = Mathf.Clamp01(d.TanNorm.x * _tanLight.x
+                                                  + d.TanNorm.y * _tanLight.y
+                                                  + d.TanNorm.z * _tanLight.z);
+                    float shadeMult = Mathf.Lerp(0.5f, 1.0f, tanShade);
+                    float totalMult = darkMult * shadeMult;
+                    Color vc = new Color(col.r * totalMult, col.g * totalMult, col.b * totalMult, 1f);
 
                     int v = i * 4;
                     verts[v]=c0; verts[v+1]=c1; verts[v+2]=c2; verts[v+3]=c3;
@@ -838,8 +789,8 @@ namespace BloodSystem
                     uvs[v+2]=new Vector2(1,1); uvs[v+3]=new Vector2(0,1);
                     cols[v]=cols[v+1]=cols[v+2]=cols[v+3]=vc;
                     int t = i * 6;
-                    tris[t]=v; tris[t+1]=v+3; tris[t+2]=v+2;
-                    tris[t+3]=v; tris[t+4]=v+2; tris[t+5]=v+1;
+                    tris[t]=v; tris[t+1]=v+2; tris[t+2]=v+3;
+                    tris[t+3]=v; tris[t+4]=v+1; tris[t+5]=v+2;
                 }
 
                 var mesh = new Mesh();
@@ -858,6 +809,18 @@ namespace BloodSystem
                 mr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
                 mr.receiveShadows    = false;
                 UnityEngine.Object.Destroy(go, CfgLifetime.Value);
+
+                if (!BloodSystemPlugin._dbgDotLogged && dots.Count > 0)
+                {
+                    BloodSystemPlugin._dbgDotLogged = true;
+                    var d0 = dots[0];
+                    Vector3 wp = parent != null ? parent.TransformPoint(verts[0]) : verts[0];
+                    BloodSystemPlugin.Log.LogInfo("[BloodSystem] DBG dot[0] worldPos=" + wp
+                        + " r=" + d0.R + " norm=" + d0.Norm
+                        + " matShader=" + mat.shader.name
+                        + " matColor=" + mat.GetColor("_Color")
+                        + " hasTex=" + (!ReferenceEquals(mat.mainTexture, null)));
+                }
             }
         }
 
@@ -964,12 +927,11 @@ namespace BloodSystem
     public class SplatterTracker : MonoBehaviour
     {
         public Collider   PrevCollider;
-        public SosigLink  PrevHitLink;       // SosigLink stored in PostMove WHILE ALIVE; survive Destroy() until next frame
-        public Sosig      LastSosig;         // S from PrevHitLink, copied while link was alive
+        public SosigLink  PrevHitLink;
+        public Sosig      LastSosig;
         public Vector3    LastSosigLinkPos;
         public Vector3    LastBulletDir;
         public float      LastBulletSpeed = 400f;
-        public Vector3    LastHitPoint;
     }
 
     // Attached to every ParticleSystem found in a sosig's hierarchy.
@@ -1046,19 +1008,16 @@ namespace BloodSystem
 
     static class BloodSystemPatches
     {
+        static bool _bloodFiredOnce;
         static readonly FieldInfo FLastColliderHit =
             typeof(BallisticProjectile).GetField("m_lastColliderHit",
-                BindingFlags.NonPublic | BindingFlags.Instance);
-        static readonly FieldInfo FHit =
-            typeof(BallisticProjectile).GetField("m_hit",
                 BindingFlags.NonPublic | BindingFlags.Instance);
         static readonly FieldInfo FVelocity =
             typeof(BallisticProjectile).GetField("m_velocity",
                 BindingFlags.NonPublic | BindingFlags.Instance);
 
-        static bool Ok => !ReferenceEquals(FLastColliderHit, null)
-                       && !ReferenceEquals(FHit,             null)
-                       && !ReferenceEquals(FVelocity,        null);
+        internal static bool Ok => !ReferenceEquals(FLastColliderHit, null)
+                                && !ReferenceEquals(FVelocity,        null);
 
         // ── Sosig.Start: attach drip polling components ───────────────────────────
 
@@ -1076,6 +1035,12 @@ namespace BloodSystem
                 // Periodic watcher: catches drip PSes that get spawned later (on first wound)
                 if (__instance.GetComponent<SosigDripWatcher>() == null)
                     __instance.gameObject.AddComponent<SosigDripWatcher>();
+
+                // Auto-grab Alloy mat from scene glass objects on first sosig spawn — no wall needed.
+                if (ReferenceEquals(BloodSystemPlugin._decalSourceMat, null)
+                    && !BloodSystemPlugin._alloyGrabPending)
+                    BloodSystemPlugin._instance.StartCoroutine(
+                        BloodSystemPlugin.TryGrabAlloyFromScene());
             }
             catch (Exception ex)
             {
@@ -1093,10 +1058,7 @@ namespace BloodSystem
             var tracker = __instance.GetComponent<SplatterTracker>();
             if (tracker == null) tracker = __instance.gameObject.AddComponent<SplatterTracker>();
 
-            // Snapshot state before this frame's movement overwrites it
             tracker.PrevCollider = FLastColliderHit.GetValue(__instance) as Collider;
-            var lastHit          = (RaycastHit)FHit.GetValue(__instance);
-            tracker.LastHitPoint = lastHit.point;
 
             var vel = (Vector3)FVelocity.GetValue(__instance);
             if (vel.magnitude > 0.01f)
@@ -1140,7 +1102,7 @@ namespace BloodSystem
                     float   spd = tracker.LastBulletSpeed > 1f ? tracker.LastBulletSpeed : 400f;
 
                     Vector3 segCenter = tracker.LastSosigLinkPos;
-                    Vector3 exitPt    = tracker.LastHitPoint + dir * 0.35f;
+                    Vector3 exitPt    = segCenter + dir * 0.1f;
                     if (!linkDestroyed)
                     {
                         // Link still alive — raycast to find the exact exit surface point
@@ -1150,6 +1112,32 @@ namespace BloodSystem
                             exitPt = xh.point + dir * 0.02f;
                     }
 
+                    if (!_bloodFiredOnce)
+                    {
+                        _bloodFiredOnce = true;
+                        BloodSystemPlugin.Log.LogInfo("[BloodSystem] First blood: " + (linkDestroyed ? "kill" : "exit") + " exitPt=" + exitPt);
+                    }
+                    if (!BloodSystemPlugin._dbgDecalLogged)
+                    {
+                        BloodSystemPlugin._dbgDecalLogged = true;
+                        try
+                        {
+                            var sb = new System.Text.StringBuilder("[BloodSystem] DBG decal types in scene: ");
+                            var seen = new System.Collections.Generic.HashSet<string>();
+                            foreach (var mono in UnityEngine.Object.FindObjectsOfType<MonoBehaviour>())
+                            {
+                                if (mono == null) continue;
+                                string tn = mono.GetType().Name;
+                                if ((tn.IndexOf("Decal", System.StringComparison.OrdinalIgnoreCase) >= 0
+                                  || tn.IndexOf("Hole",  System.StringComparison.OrdinalIgnoreCase) >= 0
+                                  || tn.IndexOf("WFX",   System.StringComparison.OrdinalIgnoreCase) >= 0)
+                                 && seen.Add(tn))
+                                    sb.Append(tn).Append(' ');
+                            }
+                            BloodSystemPlugin.Log.LogInfo(sb.ToString());
+                        }
+                        catch { }
+                    }
                     BloodSystemPlugin.SpawnProjection(exitPt, dir, src, spd);
                     BloodSystemPlugin.SpawnBloodSpray(exitPt, dir, col);
 
@@ -1176,6 +1164,54 @@ namespace BloodSystem
                     tracker.PrevHitLink      = curLink;
                     tracker.LastSosig        = curLink.S;
                     tracker.LastSosigLinkPos = curLink.transform.position;
+                }
+            }
+
+            // When bullet hits a static wall and Alloy not grabbed yet, scan next frame for WFX decal.
+            if (ReferenceEquals(BloodSystemPlugin._decalSourceMat, null)
+                && !BloodSystemPlugin._alloyGrabPending
+                && !ReferenceEquals(currentCollider, null) && currentCollider != null
+                && currentCollider.attachedRigidbody == null
+                && currentCollider.GetComponentInParent<SosigLink>() == null)
+            {
+                BloodSystemPlugin._instance.StartCoroutine(BloodSystemPlugin.TryGrabAlloyFromScene());
+            }
+        }
+
+        // Grabs WFX decal material the moment the first bullet hole decal activates.
+        // Clears _matCache so any Sprites/Default mats cached before this get replaced.
+        [HarmonyPatch]
+        static class WfxDecalMaterialGrab
+        {
+            static bool _grabbed;
+            static bool Prepare() => AccessTools.TypeByName("WFX_BulletHoleDecal") != null;
+            static System.Reflection.MethodBase TargetMethod()
+            {
+                var t = AccessTools.TypeByName("WFX_BulletHoleDecal");
+                if (t == null) return null;
+                var m = AccessTools.Method(t, "Start");
+                if (m == null) m = AccessTools.Method(t, "Awake");
+                return m;
+            }
+            static void Postfix(Component __instance)
+            {
+                if (_grabbed) return;
+                if (!ReferenceEquals(BloodSystemPlugin._decalSourceMat, null)) { _grabbed = true; return; }
+                try
+                {
+                    var r = __instance.GetComponent<Renderer>();
+                    if (ReferenceEquals(r, null) || ReferenceEquals(r.sharedMaterial, null)) return;
+                    BloodSystemPlugin._decalSourceMat = new Material(r.sharedMaterial);
+                    BloodSystemPlugin._decalSourceMat.SetInt("_Cull", 0);
+                    BloodSystemPlugin._decalSourceSearched = true;
+                    BloodSystemPlugin._matCache.Clear();
+                    _grabbed = true;
+                    BloodSystemPlugin.Log.LogInfo("[BloodSystem] WFX mat grabbed on decal Start: "
+                        + r.sharedMaterial.shader.name);
+                }
+                catch (Exception ex)
+                {
+                    BloodSystemPlugin.Log.LogWarning("[BloodSystem] WFxDecalGrab: " + ex.Message);
                 }
             }
         }
