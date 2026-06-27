@@ -80,7 +80,8 @@ namespace BloodSystem
         // Blood PNGs are used ONLY for CDF ray-direction sampling and spray particle texture
         static Texture2D   _decalTex;
         static Texture2D   _hardCircleTex;
-        static Texture2D   _firstBloodTex; // first valid PNG loaded — used as spray particle texture
+        static Texture2D         _firstBloodTex; // first valid PNG loaded — used as spray particle texture
+        static List<Texture2D>   _allTextures;   // all blood PNGs — picked randomly per impact decal
         static Texture2D   _normalMapTex;  // blood normal map (PNG with "normal"/"norm" in filename)
         // Per-color pre-baked soft circles — fallback when shader has no _Color tint property
         static readonly Dictionary<Color, Texture2D> _coloredTexCache = new Dictionary<Color, Texture2D>();
@@ -213,6 +214,7 @@ namespace BloodSystem
             if (allTextures.Count > 0)
             {
                 _firstBloodTex = allTextures[0];
+                _allTextures   = allTextures;
                 BuildSampleDataFromAll(allTextures);
                 Log.LogInfo("[BloodSystem] " + allTextures.Count + " PNG(s) loaded. CDF points="
                     + (_splatterUVs != null ? _splatterUVs.Length.ToString() : "0"));
@@ -936,35 +938,11 @@ namespace BloodSystem
             if (!CfgEnabled.Value) return;
             try
             {
-                Color   col       = GetSosigBloodColor(srcSosig);
-                Vector3 fwd       = projDir.normalized;
-                float   tanHalf   = Mathf.Tan(CfgConeAngle.Value * Mathf.Deg2Rad) * 0.8f;
-                float   range     = CfgRange.Value;
-                float   projSpeed = Mathf.Max(1f, bulletSpeed * CfgSpeedRatio.Value) + CfgSpeedBias.Value;
+                Color   col   = GetSosigBloodColor(srcSosig);
+                Vector3 fwd   = projDir.normalized;
+                float   range = CfgRange.Value;
 
-                Vector3 worldUp = Mathf.Abs(Vector3.Dot(fwd, Vector3.up)) > 0.99f
-                                ? Vector3.forward : Vector3.up;
-                Vector3 right = Vector3.Cross(worldUp, fwd).normalized;
-                Vector3 up    = Vector3.Cross(fwd, right);
-
-                float randRad = UnityEngine.Random.Range(0f, Mathf.PI * 2f);
-                float cosR = Mathf.Cos(randRad), sinR = Mathf.Sin(randRad);
-                Vector3 r2 = right * cosR + up * sinR;
-                Vector3 u2 = up    * cosR - right * sinR;
-                right = r2; up = u2;
-
-                bool animated  = string.Equals(CfgProjectionMode.Value, "Animated",  System.StringComparison.OrdinalIgnoreCase);
-                bool immediate = string.Equals(CfgProjectionMode.Value, "Immediate", System.StringComparison.OrdinalIgnoreCase);
-                float scaleMax   = CfgDotScaleMax.Value;
-                float scaleSlope = (scaleMax - 1f) / Mathf.Max(0.1f, CfgDotScaleRange.Value);
-
-                int sampleCap = (_splatterUVs != null && _splatterUVs.Length > 0) ? _splatterUVs.Length : int.MaxValue;
-                int N = gib
-                    ? Mathf.Min(Mathf.Max(1, CfgGibRayCount.Value), sampleCap)
-                    : Mathf.Min(Mathf.Max(1, CfgRayCount.Value),    sampleCap);
-
-                // Secondary guard: if exitPt still ended up inside/below a static floor,
-                // cast from 0.5m above it downward — floor within 0.6m means exitPt is embedded.
+                // Lift exitPt above embedded floor
                 {
                     var snapHits = Physics.RaycastAll(exitPt + Vector3.up * 0.5f, Vector3.down, 0.6f);
                     System.Array.Sort(snapHits, (a, b) => a.distance.CompareTo(b.distance));
@@ -978,108 +956,92 @@ namespace BloodSystem
                     }
                 }
 
-                const float BIN_S = 0.025f;
-                var staticBins = new Dictionary<int, List<DotData>>();
-                var dynBins    = new Dictionary<int, Dictionary<Transform, List<DotData>>>();
-
-                if (_flyBuf == null || _flyBuf.Length < N) _flyBuf = new ParticleSystem.Particle[N];
-                int flyCount = 0;
-                Color32 col32 = col;
-
-                for (int i = 0; i < N; i++)
+                if (gib)
                 {
-                    Vector2 uv; float dark; Vector3 tanNorm;
-                    SampleSplatter(out uv, out dark, out tanNorm);
-
-                    Vector3 dir = gib
-                        ? UnityEngine.Random.onUnitSphere
-                        : (fwd + right * uv.x * tanHalf + up * uv.y * tanHalf).normalized;
-
-                    RaycastHit h;
-                    // Origin steps BACK along bullet path so downward shots start above the floor, not below it.
-                    if (!Physics.Raycast(exitPt - fwd * 0.15f, dir, out h, range)) continue;
-                    if (IsSourceSosig(h.collider, srcSosig)) continue;
-                    if (h.collider.GetComponentInParent<SosigWeapon>() != null) continue;
-
-                    float dotR = CfgDotSize.Value * Mathf.Clamp(1f + h.distance * scaleSlope, 1f, scaleMax);
-                    int   bin  = Mathf.FloorToInt(h.distance / projSpeed / BIN_S);
-
-                    float sinAngle  = Mathf.Abs(Vector3.Dot(dir, h.normal));
-                    float elong     = Mathf.Clamp(1f / Mathf.Max(0.15f, sinAngle), 1f, 8f);
-                    Vector3 elongVec = dir - Vector3.Dot(dir, h.normal) * h.normal;
-                    if (elongVec.sqrMagnitude > 0.001f) elongVec.Normalize();
-                    else elongVec = right;
-
-                    Rigidbody hitRb = h.collider.attachedRigidbody;
-                    Transform par   = hitRb != null ? hitRb.transform : null;
-                    var dd = new DotData(h.point, h.normal, dotR, dark, tanNorm, elongVec, elong, h.distance);
-
-                    if (par == null)
+                    // Gib: several decals scattered in random directions
+                    int gibDecals = Mathf.Clamp(CfgGibRayCount.Value / 15, 3, 8);
+                    for (int i = 0; i < gibDecals; i++)
                     {
-                        if (!staticBins.ContainsKey(bin)) staticBins[bin] = new List<DotData>();
-                        staticBins[bin].Add(dd);
+                        Vector3 dir = UnityEngine.Random.onUnitSphere;
+                        RaycastHit h;
+                        if (!Physics.Raycast(exitPt, dir, out h, range)) continue;
+                        if (IsSourceSosig(h.collider, srcSosig)) continue;
+                        if (h.collider.GetComponentInParent<SosigWeapon>() != null) continue;
+                        if (h.collider.attachedRigidbody != null) continue;
+                        SpawnImpactDecal(h.point, h.normal, dir, h.distance, col, shotList, sizeScale: 0.7f);
                     }
-                    else
-                    {
-                        if (!dynBins.ContainsKey(bin))      dynBins[bin] = new Dictionary<Transform, List<DotData>>();
-                        if (!dynBins[bin].ContainsKey(par)) dynBins[bin][par] = new List<DotData>();
-                        dynBins[bin][par].Add(dd);
-                    }
-
-                    if (animated && !ReferenceEquals(_flyingDotPS, null) && flyCount < _flyBuf.Length)
-                    {
-                        float t = h.distance / projSpeed;
-                        _flyBuf[flyCount].position          = exitPt;
-                        _flyBuf[flyCount].velocity          = dir * projSpeed;
-                        _flyBuf[flyCount].startLifetime     = t;
-                        _flyBuf[flyCount].remainingLifetime = t;
-                        _flyBuf[flyCount].startSize         = dotR * 2f;
-                        _flyBuf[flyCount].startColor        = col32;
-                        flyCount++;
-                    }
-                }
-
-                if (staticBins.Count == 0 && dynBins.Count == 0) return;
-
-                if (animated && !ReferenceEquals(_flyingDotPS, null) && flyCount > 0)
-                {
-                    int prevCount = _flyingDotPS.GetParticles(_flyMergeBuf);
-                    int total     = Mathf.Min(prevCount + flyCount, _flyMergeBuf.Length);
-                    System.Array.Copy(_flyMergeBuf, 0, _flyMergeBuf, 0, prevCount);
-                    int copyN = Mathf.Min(flyCount, total - prevCount);
-                    System.Array.Copy(_flyBuf, 0, _flyMergeBuf, prevCount, copyN);
-                    _flyingDotPS.SetParticles(_flyMergeBuf, prevCount + copyN);
-                    if (!_flyingDotPS.isPlaying) _flyingDotPS.Play();
-                }
-
-                if (!_dbgDotLogged)
-                {
-                    _dbgDotLogged = true;
-                    Log.LogInfo("[BloodSystem] First projection: " + flyCount + " particles speed=" + projSpeed.ToString("F1") + " N=" + N + " mode=" + CfgProjectionMode.Value);
-                }
-
-                if (immediate)
-                {
-                    var allStatic = new List<DotData>();
-                    foreach (var kv in staticBins) allStatic.AddRange(kv.Value);
-                    if (allStatic.Count > 0) BuildDotMesh(allStatic, null, col, shotList);
-                    var dynFlat = new Dictionary<Transform, List<DotData>>();
-                    foreach (var bkv in dynBins)
-                        foreach (var pkv in bkv.Value)
-                        {
-                            if (!dynFlat.ContainsKey(pkv.Key)) dynFlat[pkv.Key] = new List<DotData>();
-                            dynFlat[pkv.Key].AddRange(pkv.Value);
-                        }
-                    foreach (var kv in dynFlat)
-                        if (!ReferenceEquals(kv.Key, null) && kv.Key != null)
-                            BuildDotMesh(kv.Value, kv.Key, col, shotList);
                 }
                 else
                 {
-                    _instance.StartCoroutine(DoDelayedSpawn(staticBins, dynBins, col, BIN_S, shotList));
+                    // Normal shot: one decal on the primary surface behind the sosig
+                    RaycastHit h;
+                    if (!Physics.Raycast(exitPt - fwd * 0.15f, fwd, out h, range)) return;
+                    if (IsSourceSosig(h.collider, srcSosig)) return;
+                    if (h.collider.GetComponentInParent<SosigWeapon>() != null) return;
+                    if (h.collider.attachedRigidbody != null) return;
+                    SpawnImpactDecal(h.point, h.normal, fwd, h.distance, col, shotList);
                 }
             }
             catch (Exception ex) { Log.LogError("[BloodSystem] SpawnProjection: " + ex); }
+        }
+
+        static void SpawnImpactDecal(Vector3 hitPt, Vector3 hitNormal, Vector3 hitDir,
+                                     float dist, Color col, List<GameObject> shotList,
+                                     float sizeScale = 1f)
+        {
+            if (_allTextures == null || _allTextures.Count == 0) return;
+            Material baseMat = GetBloodMat(col);
+            if (ReferenceEquals(baseMat, null)) return;
+
+            Texture2D bloodTex = _allTextures[UnityEngine.Random.Range(0, _allTextures.Count)];
+
+            // Size: bigger up close (≤1m → 18cm radius), smaller at range (10m → 5cm)
+            float baseR = Mathf.Lerp(0.18f, 0.05f, Mathf.Clamp01(dist / 10f)) * sizeScale;
+
+            // Elongation: grazing angle → stretched along bullet direction
+            Vector3 N    = hitNormal.normalized;
+            Vector3 vDir = hitDir.normalized;
+            float sinAngle = Mathf.Abs(Vector3.Dot(vDir, N));
+            float elong    = Mathf.Clamp(1f / Mathf.Max(0.15f, sinAngle), 1f, 4f);
+
+            // Orient quad: elongDir = bullet projected onto surface, perpDir = cross(N, elongDir)
+            Vector3 elongDir = vDir - Vector3.Dot(vDir, N) * N;
+            if (elongDir.sqrMagnitude > 0.001f) elongDir.Normalize();
+            else elongDir = Mathf.Abs(Vector3.Dot(N, Vector3.right)) > 0.9f ? Vector3.forward : Vector3.right;
+            Vector3 perpDir = Vector3.Cross(N, elongDir);
+            if (perpDir.sqrMagnitude < 0.001f) perpDir = Vector3.Cross(N, Vector3.forward);
+            perpDir.Normalize();
+
+            Vector3 qr = elongDir * (baseR * elong);
+            Vector3 qu = perpDir  * baseR;
+            Vector3 bp = hitPt + N * 0.004f;
+
+            var mesh = new Mesh();
+            mesh.vertices  = new Vector3[] { bp-qr-qu, bp+qr-qu, bp+qr+qu, bp-qr+qu };
+            mesh.uv        = new Vector2[] { new Vector2(0,0), new Vector2(1,0), new Vector2(1,1), new Vector2(0,1) };
+            mesh.colors    = new Color[]   { col, col, col, col };
+            mesh.triangles = new int[]     { 0,2,3, 0,1,2 };
+            mesh.RecalculateBounds();
+            mesh.RecalculateNormals();
+            mesh.RecalculateTangents();
+
+            var mat = new Material(baseMat);
+            mat.mainTexture = bloodTex;
+            if (!ReferenceEquals(_normalMapTex, null) && mat.HasProperty("_BumpMap"))
+            {
+                mat.SetTexture("_BumpMap", _normalMapTex);
+                mat.EnableKeyword("EFFECT_BUMP");
+            }
+
+            var go = new GameObject("BD");
+            go.AddComponent<MeshFilter>().mesh = mesh;
+            var mr = go.AddComponent<MeshRenderer>();
+            mr.material          = mat;
+            mr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+            mr.receiveShadows    = false;
+            UnityEngine.Object.Destroy(go, CfgLifetime.Value);
+            TrackGO(go, shotList);
+            _fadingStains.Add(new FadingStainState { M = mesh, BaseCol = col, SpawnTime = Time.time });
         }
 
         static IEnumerator DoDelayedSpawn(
