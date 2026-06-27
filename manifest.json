@@ -1,8 +1,8 @@
 {
     "name": "Blood_System",
-    "version_number": "1.0.0",
+    "version_number": "3.0.0",
     "website_url": "",
-    "description": "Wall blood splatter when bullets exit sosigs. Detects actual bullet penetration — no faking it with damage values.",
+    "description": "Realistic blood splatter from bullet exit wounds. Animated flying dots, spray, and drip stains. Real penetration detection — armor stops and ricochets produce no splatter.",
     "dependencies": [
         "BepInEx-BepInExPack_H3VR-5.4.1700"
     ]
