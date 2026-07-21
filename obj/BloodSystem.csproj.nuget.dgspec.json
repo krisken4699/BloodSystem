@@ -1,17 +1,17 @@
 {
   "format": 1,
   "restore": {
-    "C:\\Users\\Hp\\Desktop\\BloodSystem_Source\\BloodSystem.csproj": {}
+    "C:\\Users\\Hp\\Desktop\\BloodSystem_v3\\BloodSystem.csproj": {}
   },
   "projects": {
-    "C:\\Users\\Hp\\Desktop\\BloodSystem_Source\\BloodSystem.csproj": {
+    "C:\\Users\\Hp\\Desktop\\BloodSystem_v3\\BloodSystem.csproj": {
       "version": "1.0.0",
       "restore": {
-        "projectUniqueName": "C:\\Users\\Hp\\Desktop\\BloodSystem_Source\\BloodSystem.csproj",
+        "projectUniqueName": "C:\\Users\\Hp\\Desktop\\BloodSystem_v3\\BloodSystem.csproj",
         "projectName": "BloodSystem",
-        "projectPath": "C:\\Users\\Hp\\Desktop\\BloodSystem_Source\\BloodSystem.csproj",
+        "projectPath": "C:\\Users\\Hp\\Desktop\\BloodSystem_v3\\BloodSystem.csproj",
         "packagesPath": "C:\\Users\\Hp\\.nuget\\packages\\",
-        "outputPath": "C:\\Users\\Hp\\Desktop\\BloodSystem_Source\\obj\\",
+        "outputPath": "C:\\Users\\Hp\\Desktop\\BloodSystem_v3\\obj\\",
         "projectStyle": "PackageReference",
         "fallbackFolders": [
           "C:\\Program Files (x86)\\Microsoft Visual Studio\\Shared\\NuGetPackages"

@@ -11,11 +11,11 @@
 
   <ItemGroup>
     <Reference Include="BepInEx">
-      <HintPath>C:\Users\Hp\AppData\Roaming\r2modmanPlus-local\H3VR\profiles\new\BepInEx\core\BepInEx.dll</HintPath>
+      <HintPath>C:\Users\Hp\AppData\Roaming\r2modmanPlus-local\H3VR\profiles\dev\BepInEx\core\BepInEx.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="0Harmony">
-      <HintPath>C:\Users\Hp\AppData\Roaming\r2modmanPlus-local\H3VR\profiles\new\BepInEx\core\0Harmony.dll</HintPath>
+      <HintPath>C:\Users\Hp\AppData\Roaming\r2modmanPlus-local\H3VR\profiles\dev\BepInEx\core\0Harmony.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="UnityEngine">

@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("BloodSystem")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Release")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+d569d66d34623c83c9c43e0209abb3ecc49b9ffe")]
 [assembly: System.Reflection.AssemblyProductAttribute("BloodSystem")]
 [assembly: System.Reflection.AssemblyTitleAttribute("BloodSystem")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]

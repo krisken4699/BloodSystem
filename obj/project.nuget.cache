@@ -1,8 +1,8 @@
 {
   "version": 2,
-  "dgSpecHash": "fk0gqfbAkL0=",
+  "dgSpecHash": "wLT10SPdbRs=",
   "success": true,
-  "projectFilePath": "C:\\Users\\Hp\\Desktop\\BloodSystem_Source\\BloodSystem.csproj",
+  "projectFilePath": "C:\\Users\\Hp\\Desktop\\BloodSystem_v3\\BloodSystem.csproj",
   "expectedPackageFiles": [
     "C:\\Users\\Hp\\.nuget\\packages\\microsoft.netframework.referenceassemblies\\1.0.3\\microsoft.netframework.referenceassemblies.1.0.3.nupkg.sha512",
     "C:\\Users\\Hp\\.nuget\\packages\\microsoft.netframework.referenceassemblies.net46\\1.0.3\\microsoft.netframework.referenceassemblies.net46.1.0.3.nupkg.sha512"
