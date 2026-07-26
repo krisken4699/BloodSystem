@@ -1,3 +1,16 @@
+## 3.3.4
+- Fixed: splatter could fail to appear on a real penetrating hit — most noticeable on headshots. The exit-wound raycasts started just behind the bullet's exit point and fanned out into a cone; on a small target like a head that cone easily clipped back into the sosig's own geometry, and a hit on your own sosig killed that ray outright instead of continuing on to whatever was actually behind it (the wall). Rays now pass through the sosig (and its weapon) that fired them and keep going until they find the real surface, same as the gib-explosion burst.
+
+## 3.3.3
+- Version bump only (3.3.2 upload rejected by Thunderstore as a duplicate version number) - no code changes since 3.3.2.
+
+## 3.3.2
+- Aiyke Compat Mode config removed - "Approximate" never worked right in practice, so this mod now always uses "Override" when the Aiyke code mod pack is detected: it removes Aiyke's own penetration-physics/damage-multiplier patches on startup so this mod's normal precise splatter detection runs. Aiyke's other features (aim assist, red blood, alertness, hit sounds, etc) are untouched.
+- New defaults, matching values tuned and verified in testing: Dot base radius 0.008, Range 40m, Dot Scale Range 50m, Spray Enabled on by default.
+
+## 3.3.1
+- Fixed: Aiyke Compat Mode "Override" silently did nothing — a startup crash (caused by comparing a couple of reflection values in a way that this game's Mono runtime doesn't support) killed the compat step before it could actually remove Aiyke's conflicting patch, so splatter stayed broken even with Override selected. Override now correctly restores this mod's own precise penetration detection.
+
 ## 3.3.0
 - Fixed: splatter (the wall/floor splash effect) could end up permanently invisible on any install — a startup step always built a technically-working-but-invisible material and, in doing so, blocked the one path that would have replaced it with a visible one. Splatter now renders correctly from the very first shot, no wall-shooting or workaround needed, and still upgrades itself automatically to the higher-quality material the first time it gets the chance.
 - New config: Splatter Enabled, Spray Enabled (default OFF), Vanilla Particle Staining Enabled, Blood Drip Stains Enabled — the four blood effects can now be toggled independently. Spray (the wide-cone particle burst on wounds) defaults off since a lot of players found it looked unintentional.

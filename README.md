@@ -51,7 +51,7 @@ All settings in F1 (ConfigurationManager) or the `.cfg` file in BepInEx/config.
 | Max rays per shot | 3000 | Raycasts per penetration event (capped to image pixel count) |
 | Cone half-angle | 10 | Half-angle in degrees of the splash spread cone |
 | Dot base radius | 0.008 | Base radius of each splash dot in metres |
-| Range metres | 50 | Maximum splash cast distance |
+| Range metres | 40 | Maximum splash cast distance |
 | Projection Mode | Animated | How dots appear: Animated / Delayed / Immediate |
 | Projection Speed Ratio | 2 | Bullet speed multiplier for dot travel speed in Animated mode |
 | Projection Speed Bias | 10 | Flat m/s added to dot travel speed |
@@ -61,21 +61,15 @@ All settings in F1 (ConfigurationManager) or the `.cfg` file in BepInEx/config.
 | Color Override | #8C1A1A | Hex blood color used when Color Override Mode is Soft or Hard |
 | Color Override Mode | 0 | `1` = Soft override, `2` = Hard override, anything else = Unset (see Color Override section above) |
 | Splatter Enabled | true | Toggle the wall/floor splash effect on its own |
-| Spray Enabled | false | Toggle the wound particle burst on its own |
+| Spray Enabled | true | Toggle the wound particle burst on its own |
 | Vanilla Particle Staining Enabled | true | Toggle whether vanilla sosig bleed-out particles get intercepted and made to leave a stain |
 | Blood Drip Stains Enabled | true | Toggle the dripping-wound floor stains on their own |
-| Aiyke Compat Mode | Approximate | Only relevant if the "Aiyke code mod pack" is also installed — see Aiyke Compatibility below |
 
 ## Aiyke Compatibility
 
-The "Aiyke code mod pack" rewrites bullet-penetration physics, which can make this mod's splatter almost never appear if left unhandled. If Aiyke is detected, `Aiyke Compat Mode` picks how to cope:
+The "Aiyke code mod pack" rewrites bullet-penetration physics, which can make this mod's splatter almost never appear if left unhandled. If Aiyke is detected, this mod automatically removes Aiyke's own penetration-physics and output-damage-multiplier patches on startup, so this mod's normal precise penetration detection runs as intended. In exchange you lose Aiyke's "Modified bullet penetration" and "Output damage multiplier" features specifically — its other features (aim assist, red blood, enemy alertness, hit sounds, etc) are untouched.
 
-| Mode | Behavior |
-|---|---|
-| `Approximate` (default) | Splatter fires on any hit that deals damage, not just ones this mod can confirm as a clean penetration. Less geometrically precise (can trigger on ricochets/blunt hits too), but every Aiyke feature keeps working exactly as installed. |
-| `Override` | On startup this mod removes Aiyke's own penetration-physics and output-damage-multiplier patches, so this mod's normal precise penetration detection works exactly as intended. In exchange you lose Aiyke's "Modified bullet penetration" and "Output damage multiplier" features specifically — its other features (aim assist, red blood, enemy alertness, hit sounds, etc) are untouched. |
-
-Ignored entirely if Aiyke isn't installed.
+No config needed — this is automatic whenever Aiyke is installed, and does nothing if it isn't.
 
 ## Performance Tips
 

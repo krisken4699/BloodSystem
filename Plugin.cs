@@ -30,7 +30,7 @@ namespace BloodSystem
         }
     }
 
-    [BepInPlugin("h3vr.invent60.bloodsystem", "Blood System", "3.3.0")]
+    [BepInPlugin("h3vr.invent60.bloodsystem", "Blood System", "3.3.4")]
     // Soft dependency (no hard requirement, no compile-time reference to Aiyke's assembly) purely
     // to control load order: if Aiyke IS installed, BepInEx loads it before us, so its Harmony
     // patches already exist by the time our Awake runs TryOverrideAiykePenetration below.
@@ -62,6 +62,16 @@ namespace BloodSystem
         // no hard dependency on the Human mod's assembly and still works fine without it installed.
         internal static ConfigEntry<bool> CfgSplashOnHumans;
 
+        // 2026-07-23 (Ken, Human mod dev: "make hands and arms bleed less... make them bleed a
+        // ratio of if shot in head or body"). Same loose-coupling pattern as CfgSplashOnHumans
+        // above - the Human mod's HumanLimbHitbox knows exactly which limb group was hit (this
+        // plugin only ever sees a SosigLink, and vanilla's 4-link model has no separate arm link
+        // at all - Human-mod arm hits and torso hits share the same Torso SosigLink, so this
+        // plugin alone could never tell them apart). Set via reflection right before the Human
+        // mod forwards a hit into SosigLink.Damage, consumed and reset to 1 the instant this
+        // patch reads it so it only ever scales the ONE hit it was set for.
+        public static float ExternalBloodScale = 1f;
+
         // Player-reported toggles (aiyke mod users, 2026-07-21): splash never appeared for them
         // (see GetBloodMat fallback fix below), and they asked to be able to turn off the
         // wound-scatter spray and the vanilla-particle staining independently of everything else.
@@ -79,11 +89,11 @@ namespace BloodSystem
         // "clean penetration" branch; ricochets/absorbed hits land back on the near side or
         // exactly on the surface, so dot never goes negative and SpawnProjection/SpawnBloodSpray
         // never get called at all for most hits. Two ways to cope, user's choice:
-        internal static ConfigEntry<string> CfgAiykeCompatMode;
-        // True when Aiyke is installed AND compat mode is NOT "Override" - fires blood directly
-        // from SosigLink.Damage data (OnSosigLinkDamage) instead of waiting on PostMove's dot<0
-        // geometry, since Aiyke's own prefix still lets that postfix run normally either way.
-        internal static bool _aiykeApproximate;
+        // Aiyke compat is always "Override": on startup this mod removes Aiyke's own
+        // penetration-physics/damage-multiplier patches from MoveBullet so this mod's normal
+        // precise penetration detection runs. The old "Approximate" compat mode (fire blood
+        // straight off Damage data instead) was dropped - always broken in practice, nobody
+        // used it.
 
         internal static readonly Color _mustardFallback = new Color(0.9f, 0.8f, 0f, 1f);
 
@@ -177,8 +187,8 @@ namespace BloodSystem
             CfgLifetime  = Config.Bind("Blood", "Lifetime seconds",  30f,    "How long splash and drip stains last before despawning.");
             CfgRayCount  = Config.Bind("Blood", "Max rays per shot",  3000,   "Maximum splash ray count. Capped to the actual number of image pixels if fewer.");
             CfgConeAngle = Config.Bind("Blood", "Cone half-angle",   10f,    "Half-angle in degrees of the splash cone.");
-            CfgDotSize   = Config.Bind("Blood", "Dot base radius",   0.010f, "Base radius of each splash dot in metres. Scales to Dot Max Scale at Dot Scale Range distance.");
-            CfgRange          = Config.Bind("Blood", "Range metres",            50f,       "Maximum splash distance in metres.");
+            CfgDotSize   = Config.Bind("Blood", "Dot base radius",   0.008f, "Base radius of each splash dot in metres. Scales to Dot Max Scale at Dot Scale Range distance.");
+            CfgRange          = Config.Bind("Blood", "Range metres",            40f,       "Maximum splash distance in metres.");
             CfgProjectionMode = Config.Bind("Blood", "Projection Mode",         "Animated",
                 "How splash dots appear. Animated: dots fly from wound to wall in real-time (best visuals, most FPS cost). " +
                 "Delayed: dots appear all at once after a timed delay with no animation (moderate). " +
@@ -192,7 +202,7 @@ namespace BloodSystem
             CfgDotScaleMax    = Config.Bind("Blood", "Dot Max Scale",           5f,
                 "Maximum size multiplier applied to splash dots at Dot Scale Range distance. " +
                 "5 means dots at full range are 5x the base radius. Default 5.");
-            CfgDotScaleRange  = Config.Bind("Blood", "Dot Scale Range metres",  30f,
+            CfgDotScaleRange  = Config.Bind("Blood", "Dot Scale Range metres",  50f,
                 "Distance in metres at which splash dots reach their maximum size (Dot Max Scale). " +
                 "Dots near the wound start at Dot Base Radius and grow linearly to this range. Default 30.");
             CfgGibRayCount    = Config.Bind("Blood", "Gib Ray Count",           200,
@@ -212,17 +222,12 @@ namespace BloodSystem
                 "Any other value = Unset: no override, vanilla per-sosig color behavior.");
             CfgSplatterEnabled = Config.Bind("Blood", "Splatter Enabled", true,
                 "Projected blood splash dots on walls/floor/props from the bullet wound. The main splatter effect.");
-            CfgSprayEnabled = Config.Bind("Blood", "Spray Enabled", false,
+            CfgSprayEnabled = Config.Bind("Blood", "Spray Enabled", true,
                 "Blood particles that scatter outward from the wound in a wide cone/sphere, not just along the bullet path. Off by default - many players found this looked like an unintended splatter-sphere.");
             CfgVanillaStainEnabled = Config.Bind("Blood", "Vanilla Particle Staining Enabled", true,
                 "Whether vanilla sosig bleed-out particles get intercepted and made to leave a stain when they land. When off, vanilla bleed particles behave as in unmodded H3VR (fall/bounce, no stain).");
             CfgDripStainsEnabled = Config.Bind("Blood", "Blood Drip Stains Enabled", true,
                 "Our own dripping-wound blood drops that fall from the wound over time and stain the floor.");
-            CfgAiykeCompatMode = Config.Bind("Blood", "Aiyke Compat Mode", "Approximate",
-                "Only matters if the 'Aiyke code mod pack' is also installed. That mod fully replaces bullet penetration physics, which breaks this mod's precise penetration detection - without one of the two choices below, splatter almost never appears. " +
-                "'Approximate' (default): splatter fires on every hit that deals damage, not just ones this mod can confirm as a clean penetration. Less geometrically precise (can trigger on ricochets/blunt hits too), but every Aiyke feature keeps working exactly as installed. " +
-                "'Override': on startup this mod removes Aiyke's own penetration-physics and output-damage-multiplier patches from the bullet-movement function, so this mod's normal precise penetration detection works exactly as intended. In exchange you lose Aiyke's 'Modified bullet penetration' and 'Output damage multiplier' features specifically - its other features (aim assist, red blood, enemy alertness, hit sounds, etc) are untouched. " +
-                "Ignored entirely if Aiyke isn't installed.");
 
             // Soft-circle for splash dots, hard-circle for drip stains
             _decalTex      = MakeSoftCircle(96);
@@ -302,16 +307,13 @@ namespace BloodSystem
             BuildSprayPSes();
 
             new Harmony("h3vr.invent60.bloodsystem").PatchAll(typeof(BloodSystemPatches));
-            Log.LogInfo("[BloodSystem] 3.3.0 loaded. FieldsOK=" + BloodSystemPatches.Ok);
+            Log.LogInfo("[BloodSystem] 3.3.4 loaded. FieldsOK=" + BloodSystemPatches.Ok);
 
             bool aiykePresent = BepInEx.Bootstrap.Chainloader.PluginInfos.ContainsKey("Aiyke.code_mod");
             if (aiykePresent)
             {
-                bool overrideMode = string.Equals(CfgAiykeCompatMode.Value, "Override", System.StringComparison.OrdinalIgnoreCase);
-                _aiykeApproximate = !overrideMode;
-                Log.LogInfo("[BloodSystem] Aiyke code mod pack detected. Aiyke Compat Mode = "
-                    + CfgAiykeCompatMode.Value + " (" + (overrideMode ? "removing Aiyke's MoveBullet patches" : "approximate blood trigger active") + ").");
-                if (overrideMode) TryOverrideAiykePenetration();
+                Log.LogInfo("[BloodSystem] Aiyke code mod pack detected - overriding its MoveBullet penetration patches so this mod's own splatter detection works.");
+                TryOverrideAiykePenetration();
             }
         }
 
@@ -325,15 +327,19 @@ namespace BloodSystem
             try
             {
                 var mb = AccessTools.Method(typeof(BallisticProjectile), "MoveBullet", new[] { typeof(float) });
-                if (mb == null) return;
+                if (ReferenceEquals(mb, null)) return;
                 var info = Harmony.GetPatchInfo(mb);
-                if (info == null || info.Prefixes == null) return;
+                if (ReferenceEquals(info, null) || ReferenceEquals(info.Prefixes, null)) return;
 
                 var harmony = new Harmony("h3vr.invent60.bloodsystem");
                 int removed = 0;
                 foreach (var p in info.Prefixes)
                 {
-                    if (p.PatchMethod != null && p.PatchMethod.DeclaringType != null
+                    // H3VR's Mono is missing MethodInfo/Type.op_Equality - a plain "!= null" or
+                    // "== null" on reflection members throws MissingMethodException here (crashes
+                    // Awake entirely, silently skipping the unpatch). ReferenceEquals avoids the
+                    // operator call. See feedback-no-type-equality memory.
+                    if (!ReferenceEquals(p.PatchMethod, null) && !ReferenceEquals(p.PatchMethod.DeclaringType, null)
                         && p.PatchMethod.DeclaringType.FullName == "plugin.code_mod")
                     {
                         harmony.Unpatch(mb, p.PatchMethod);
@@ -1103,9 +1109,16 @@ namespace BloodSystem
 
         // ── Spawn: splash projection ──────────────────────────────────────────────
 
+        // 2026-07-22 (Ken, cross-mod ask: "make the pellets, rays, fragments, whatever that
+        // comes from grenade and hit sosigs and humans cause 1/5th the splatter rays casted
+        // than the set one"). rayCountScale lets a caller cut the ray count for a specific
+        // damage class without touching the shared CfgRayCount/CfgGibRayCount config values
+        // everything else still uses at full strength. Defaults to 1f (no change) for every
+        // existing call site.
         internal static void SpawnProjection(Vector3 exitPt, Vector3 projDir,
                                               Sosig srcSosig, float bulletSpeed,
-                                              bool gib = false, List<GameObject> shotList = null)
+                                              bool gib = false, List<GameObject> shotList = null,
+                                              float rayCountScale = 1f)
         {
             if (!CfgEnabled.Value || !CfgSplatterEnabled.Value) return;
             try
@@ -1136,6 +1149,7 @@ namespace BloodSystem
                 int N = gib
                     ? Mathf.Min(Mathf.Max(1, CfgGibRayCount.Value), sampleCap)
                     : Mathf.Min(Mathf.Max(1, CfgRayCount.Value),    sampleCap);
+                if (rayCountScale < 0.999f) N = Mathf.Max(1, Mathf.RoundToInt(N * rayCountScale));
 
                 // Gib explosion: spread rays over multiple frames to avoid a single huge spike.
                 if (gib)
@@ -1177,11 +1191,27 @@ namespace BloodSystem
                         ? UnityEngine.Random.onUnitSphere
                         : (fwd + right * uv.x * tanHalf + up * uv.y * tanHalf).normalized;
 
-                    RaycastHit h;
                     // Origin steps BACK along bullet path so downward shots start above the floor, not below it.
-                    if (!Physics.Raycast(exitPt - fwd * 0.15f, dir, out h, range)) continue;
-                    if (IsSourceSosig(h.collider, srcSosig)) continue;
-                    if (h.collider.GetComponentInParent<SosigWeapon>() != null) continue;
+                    // That backward step (and a wide cone on a small target like a head) means a ray
+                    // can easily clip back into the SAME sosig that emitted it before ever reaching the
+                    // wall - a plain Physics.Raycast stops at that first hit and the ray is silently
+                    // dropped, which is why headshots especially could produce little/no splatter even
+                    // on a confirmed penetration. Cast through all hits instead and skip past the source
+                    // sosig's own colliders (and its weapon) to find whatever is actually behind it.
+                    int hitCount = Physics.RaycastNonAlloc(exitPt - fwd * 0.15f, dir, _rayBuf, range);
+                    System.Array.Sort(_rayBuf, 0, hitCount, _rhCompare);
+                    RaycastHit h = default(RaycastHit);
+                    bool foundHit = false;
+                    for (int hi = 0; hi < hitCount; hi++)
+                    {
+                        RaycastHit cand = _rayBuf[hi];
+                        if (IsSourceSosig(cand.collider, srcSosig)) continue;
+                        if (cand.collider.GetComponentInParent<SosigWeapon>() != null) continue;
+                        h = cand;
+                        foundHit = true;
+                        break;
+                    }
+                    if (!foundHit) continue;
 
                     float dotR = CfgDotSize.Value * Mathf.Clamp(1f + h.distance * scaleSlope, 1f, scaleMax);
                     int   bin  = Mathf.FloorToInt(h.distance / projSpeed / BIN_S);
@@ -1279,10 +1309,23 @@ namespace BloodSystem
                 SampleSplatter(out uv, out dark, out bright, out tanNorm);
                 Vector3 dir = UnityEngine.Random.onUnitSphere;
 
-                RaycastHit h;
-                if (Physics.Raycast(pos, dir, out h, range)
-                    && !IsSourceSosig(h.collider, srcSosig)
-                    && h.collider.GetComponentInParent<SosigWeapon>() == null)
+                // Gib rays start at the segment's own position, right inside the sosig's remaining
+                // body - pass through the source sosig's colliders the same way the exit-wound rays
+                // do instead of dropping any ray that happens to clip another part of itself first.
+                int gHitCount = Physics.RaycastNonAlloc(pos, dir, _rayBuf, range);
+                System.Array.Sort(_rayBuf, 0, gHitCount, _rhCompare);
+                RaycastHit h = default(RaycastHit);
+                bool gFound = false;
+                for (int ghi = 0; ghi < gHitCount; ghi++)
+                {
+                    RaycastHit gc = _rayBuf[ghi];
+                    if (IsSourceSosig(gc.collider, srcSosig)) continue;
+                    if (gc.collider.GetComponentInParent<SosigWeapon>() != null) continue;
+                    h = gc;
+                    gFound = true;
+                    break;
+                }
+                if (gFound)
                 {
                     float dotR     = CfgDotSize.Value * Mathf.Clamp(1f + h.distance * scaleSlope, 1f, scaleMax);
                     float sinAngle = Mathf.Abs(Vector3.Dot(dir, h.normal));
@@ -2030,6 +2073,7 @@ namespace BloodSystem
         public Color   PendingCol;
         public Vector3 PendingEntryPt;
         public bool    IsPlayerShot;
+        public float   PendingBloodScale = 1f;
     }
 
     // Attached to a ParticleSystem. Detects particles near any static surface and stamps stains.
@@ -2277,6 +2321,9 @@ namespace BloodSystem
         //   Penetrating bullet: ends up past the surface → dot < 0 → fire.
         //   Deflected bullet: ends up outside/back → dot ≥ 0 → no fire.
         // Collider-change guard prevents re-firing while bullet stays inside same link.
+        // Confirmed byte-identical to the shipped v3.2.2 binary (decompiled and diffed 2026-07-26)
+        // — a multi-tick variant was tried and reverted the same day after it introduced a stale-
+        // pooled-tracker bug; don't re-attempt without a much more careful pooling-lifecycle guard.
 
         [HarmonyPatch(typeof(BallisticProjectile), "MoveBullet", typeof(float))]
         [HarmonyPostfix]
@@ -2307,10 +2354,6 @@ namespace BloodSystem
                 Sosig hitSosig = shotLink != null ? shotLink.S : currentCollider.GetComponentInParent<Sosig>();
                 if (hitSosig == null) goto alloyCheck;
 
-                // Approximate Aiyke compat already fired (or chose not to) from OnSosigLinkDamage
-                // directly - this dot<0 geometry path is the "Override"/no-Aiyke path only.
-                if (BloodSystemPlugin._aiykeApproximate) goto alloyCheck;
-
                 var     hit = (RaycastHit)FHit.GetValue(__instance);
                 float   dot = Vector3.Dot(__instance.transform.position - hit.point, hit.normal);
                 if (dot >= 0f) goto alloyCheck;  // deflected or glancing — not a penetration
@@ -2325,7 +2368,9 @@ namespace BloodSystem
                 bool    hasPending = tracker.PendingBlood;
                 Vector3 entryPt = hasPending ? tracker.PendingEntryPt  : hit.point;
                 Vector3 exitPt  = hasPending ? tracker.PendingExitPt   : hit.point + dir * 0.35f;
+                float   bloodScale = hasPending ? tracker.PendingBloodScale : 1f;
                 tracker.PendingBlood = false;
+                tracker.PendingBloodScale = 1f;
 
                 if (!_bloodFiredOnce)
                 {
@@ -2335,10 +2380,10 @@ namespace BloodSystem
                 }
 
                 var shotList = BloodSystemPlugin.StartShotGroup();
-                BloodSystemPlugin.SpawnProjection(exitPt, dir, src, spd, false, shotList);
-                BloodSystemPlugin.SpawnBloodSpray(exitPt, dir, col);
-                BloodSystemPlugin.SpawnBloodDrops(exitPt,  dir, col, 10, shotList);
-                BloodSystemPlugin.SpawnBloodDrops(entryPt, -dir, col,  8, shotList);
+                BloodSystemPlugin.SpawnProjection(exitPt, dir, src, spd, false, shotList, bloodScale);
+                BloodSystemPlugin.SpawnBloodSpray(exitPt, dir, col, false, 1f, bloodScale);
+                BloodSystemPlugin.SpawnBloodDrops(exitPt,  dir, col, Mathf.Max(1, Mathf.RoundToInt(10 * bloodScale)), shotList);
+                BloodSystemPlugin.SpawnBloodDrops(entryPt, -dir, col, Mathf.Max(1, Mathf.RoundToInt(8 * bloodScale)), shotList);
             }
 
             alloyCheck:
@@ -2455,6 +2500,10 @@ namespace BloodSystem
                     catch { }
                 }
 
+                // 2026-07-23: consumed and reset immediately so it only ever applies to THIS hit.
+                float bloodScale = BloodSystemPlugin.ExternalBloodScale;
+                BloodSystemPlugin.ExternalBloodScale = 1f;
+
                 // Store for PostMove velocity check (armor → velocity ≈ 0 → no blood).
                 var t = _activeBulletTracker;
                 t.PendingBlood      = true;
@@ -2463,22 +2512,7 @@ namespace BloodSystem
                 t.PendingSrc        = src;
                 t.PendingCol        = col;
                 t.PendingEntryPt    = d.point;
-
-                // Aiyke "Approximate" compat: fire here, off Damage data, instead of waiting for
-                // PostMove's dot<0 geometry check - Aiyke's own MoveBullet replacement rarely
-                // leaves the bullet on the far side of the surface, so that check almost never
-                // passes under Aiyke. PostMove's own dot<0 block is skipped in this mode (see
-                // its own check) so this doesn't double-fire on hits that would've also passed
-                // the geometry test.
-                if (BloodSystemPlugin._aiykeApproximate)
-                {
-                    t.PendingBlood = false;
-                    var shotList = BloodSystemPlugin.StartShotGroup();
-                    BloodSystemPlugin.SpawnProjection(exitPt, sDir, src, t.LastBulletSpeed, false, shotList);
-                    BloodSystemPlugin.SpawnBloodSpray(exitPt, sDir, col);
-                    BloodSystemPlugin.SpawnBloodDrops(exitPt,   sDir, col, 10, shotList);
-                    BloodSystemPlugin.SpawnBloodDrops(d.point, -sDir, col,  8, shotList);
-                }
+                t.PendingBloodScale = bloodScale;
             }
             catch (Exception ex)
             {
@@ -2537,8 +2571,14 @@ namespace BloodSystem
                     BloodSystemPlugin.Log.LogInfo("[BloodSystem] First blood via LinkExplodes gib pos=" + pos + " entrySpd=" + entrySpd.ToString("F0") + " scale=" + speedScale.ToString("F2"));
                 }
 
+                // 2026-07-22 (Ken: "make the pellets, rays, fragments, whatever that comes from
+                // grenade and hit sosigs and humans cause 1/5th the splatter rays casted than
+                // the set one"). Applies to both sosigs and Human-mod humans (this call site
+                // runs for anyone NOT already excluded above) - explosive-class kills only, every
+                // other damage class keeps the full configured ray count unchanged.
+                float rayScale = damClass == Damage.DamageClass.Explosive ? 0.2f : 1f;
                 var shotList = BloodSystemPlugin.StartShotGroup();
-                BloodSystemPlugin.SpawnProjection(pos, dir, src, spd, realGib, shotList);
+                BloodSystemPlugin.SpawnProjection(pos, dir, src, spd, realGib, shotList, rayScale);
                 BloodSystemPlugin.SpawnBloodSpray(pos, dir, col, realGib, speedScale);
                 BloodSystemPlugin.SpawnBloodDrops(pos, dir, col, 10, shotList);
 
