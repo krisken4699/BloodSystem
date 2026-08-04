@@ -2367,11 +2367,14 @@ namespace BloodSystem
     [HarmonyPatch]
     static class ThermalArmHook
     {
-        static bool Prepare() { return AccessTools.TypeByName("PIPScope") != null; }
+        // ReferenceEquals, never == / != : H3VR's Mono has no Type.op_Equality/op_Inequality, so
+        // a plain null-compare on a Type throws MissingMethodException at runtime. That killed
+        // this whole patch class on first load once already.
+        static bool Prepare() { return !ReferenceEquals(AccessTools.TypeByName("PIPScope"), null); }
         static MethodBase TargetMethod()
         {
             var t = AccessTools.TypeByName("PIPScope");
-            if (t == null) return null;
+            if (ReferenceEquals(t, null)) return null;
             return AccessTools.Method(t, "ApplyCameraShader");
         }
         static void Postfix(bool isThermal)
@@ -2792,7 +2795,7 @@ namespace BloodSystem
         static class WfxDecalMaterialGrab
         {
             static bool _grabbed;
-            static bool Prepare() => AccessTools.TypeByName("WFX_BulletHoleDecal") != null;
+            static bool Prepare() => !ReferenceEquals(AccessTools.TypeByName("WFX_BulletHoleDecal"), null);
             static System.Reflection.MethodBase TargetMethod()
             {
                 var t = AccessTools.TypeByName("WFX_BulletHoleDecal");
@@ -2848,7 +2851,7 @@ namespace BloodSystem
         [HarmonyPatch]
         static class OnslaughtNaturalDeathPatch
         {
-            static bool Prepare() => AccessTools.TypeByName("localpcnerd.OnslaughtMode.OnslaughtManager") != null;
+            static bool Prepare() => !ReferenceEquals(AccessTools.TypeByName("localpcnerd.OnslaughtMode.OnslaughtManager"), null);
 
             static System.Reflection.MethodBase TargetMethod()
             {
@@ -2880,7 +2883,7 @@ namespace BloodSystem
                             spawnedSosigs.RemoveAt(i);
                             continue;
                         }
-                        if (markerType == null) { markerType = marker.GetType(); sosigField = AccessTools.Field(markerType, "sosig"); }
+                        if (ReferenceEquals(markerType, null)) { markerType = marker.GetType(); sosigField = AccessTools.Field(markerType, "sosig"); }
                         if (sosigField == null) continue;
 
                         Sosig sosig = sosigField.GetValue(marker) as Sosig;
