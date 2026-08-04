@@ -22,11 +22,12 @@ namespace BloodSystem
         public Vector3 ElongDir;   // bullet direction projected onto hit surface (world space)
         public float   Elongation; // stretch factor: 1=round, >1=elongated along ElongDir
         public float   Dist;       // hit distance — used for range-edge alpha fade
+        public byte    CurveClass; // thermal cooling curve group, baked from source-PNG blood density
         public DotData(Vector3 pos, Vector3 norm, float r, float dark, float bright, Vector3 tanNorm,
-                       Vector3 elongDir, float elongation, float dist)
+                       Vector3 elongDir, float elongation, float dist, byte curveClass)
         {
             Pos = pos; Norm = norm; R = r; Dark = dark; Bright = bright; TanNorm = tanNorm;
-            ElongDir = elongDir; Elongation = elongation; Dist = dist;
+            ElongDir = elongDir; Elongation = elongation; Dist = dist; CurveClass = curveClass;
         }
     }
 
@@ -97,10 +98,13 @@ namespace BloodSystem
 
         internal static readonly Color _mustardFallback = new Color(0.9f, 0.8f, 0f, 1f);
 
-        // Decal material cache: one Material per blood Color — uses _decalTex (soft circle)
-        internal static readonly Dictionary<Color, Material> _matCache     = new Dictionary<Color, Material>();
+        // Decal material cache — uses _decalTex (soft circle).
+        // Keyed by colour AND thermal cohort: blood spawned at different times is at different
+        // temperatures, and temperature lives on the material (see BloodThermal). With thermal
+        // disabled every cohort id is 0, so this behaves exactly as the old per-colour cache.
+        internal static readonly Dictionary<MatKey, Material> _matCache     = new Dictionary<MatKey, Material>();
         // Drip stain material cache: same as _matCache but texture = _hardCircleTex
-        internal static readonly Dictionary<Color, Material> _dripMatCache = new Dictionary<Color, Material>();
+        internal static readonly Dictionary<MatKey, Material> _dripMatCache = new Dictionary<MatKey, Material>();
 
         // Shot group tracking: all GOs from one shot grouped by ID.
         // Evict the oldest shot group when CfgMaxShots is exceeded.
@@ -137,6 +141,9 @@ namespace BloodSystem
         static float[]   _splatterDarks;
         static float[]   _splatterBrights; // per-sample brightness from noise.png at same UV (0.88-1.0)
         static Vector3[] _splatterNormals;
+        // Per-sample cooling curve class, baked from how densely packed with blood that part of the
+        // source PNG is. 0 = densest. Only used by the thermal system.
+        static byte[]    _splatterClasses;
 
         // Fixed tangent-space light for per-dot normal shading
         static readonly Vector3 _tanLight = new Vector3(0.5f, 0.5f, 0.707f).normalized;
@@ -229,6 +236,11 @@ namespace BloodSystem
             CfgDripStainsEnabled = Config.Bind("Blood", "Blood Drip Stains Enabled", true,
                 "Our own dripping-wound blood drops that fall from the wound over time and stain the floor.");
 
+            BloodThermal.BindConfig(Config);
+            // Must run before the CDF is built — BuildSampleDataFromAll asks it how many cooling
+            // curve classes to split the splatter samples into.
+            BloodThermal.Init();
+
             // Soft-circle for splash dots, hard-circle for drip stains
             _decalTex      = MakeSoftCircle(96);
             _hardCircleTex = MakeHardCircle(64);
@@ -301,12 +313,16 @@ namespace BloodSystem
 
             _fogMat    = BuildSprayMaterial();
             _pelletMat = BuildSprayMaterial();
+            BloodThermal.MarkAlwaysHot(_fogMat);
+            BloodThermal.MarkAlwaysHot(_pelletMat);
             // Give flying-dot PS the same material as spray pellets (blood texture, alpha-blend)
             if (!ReferenceEquals(_flyingDotPS, null) && !ReferenceEquals(_pelletMat, null))
                 _flyingDotPS.GetComponent<ParticleSystemRenderer>().material = _pelletMat;
             BuildSprayPSes();
 
-            new Harmony("h3vr.invent60.bloodsystem").PatchAll(typeof(BloodSystemPatches));
+            var harmony = new Harmony("h3vr.invent60.bloodsystem");
+            harmony.PatchAll(typeof(BloodSystemPatches));
+            harmony.PatchAll(typeof(ThermalArmHook));
             Log.LogInfo("[BloodSystem] 3.3.4 loaded. FieldsOK=" + BloodSystemPatches.Ok);
 
             bool aiykePresent = BepInEx.Bootstrap.Chainloader.PluginInfos.ContainsKey("Aiyke.code_mod");
@@ -315,6 +331,13 @@ namespace BloodSystem
                 Log.LogInfo("[BloodSystem] Aiyke code mod pack detected - overriding its MoveBullet penetration patches so this mod's own splatter detection works.");
                 TryOverrideAiykePenetration();
             }
+        }
+
+        // The only per-frame work this plugin does. BloodThermal.Tick is a single float compare
+        // on almost every frame — it only touches anything when a precomputed cooling step is due.
+        void Update()
+        {
+            BloodThermal.Tick();
         }
 
         // "Override" compat mode: surgically removes only Aiyke's own patches on
@@ -354,11 +377,18 @@ namespace BloodSystem
 
         // ── Drip stain material cache (hard circle, cached per color) ─────────────
 
+        // Drips and spray are thin, exposed blood — always the thinnest cooling class.
         internal static Material GetDripMat(Color col)
         {
+            return GetDripMat(col, BloodThermal.CurrentCohort(BloodThermal.Classes - 1));
+        }
+
+        internal static Material GetDripMat(Color col, int cohortId)
+        {
+            var key = new MatKey(col, cohortId);
             Material m;
-            if (_dripMatCache.TryGetValue(col, out m) && !ReferenceEquals(m, null)) return m;
-            Material src = GetBloodMat(col);
+            if (_dripMatCache.TryGetValue(key, out m) && !ReferenceEquals(m, null)) return m;
+            Material src = GetBloodMat(col, cohortId);
             if (ReferenceEquals(src, null))
             {
                 if (ReferenceEquals(_pelletMat, null)) return null;
@@ -371,7 +401,8 @@ namespace BloodSystem
             }
             if (!ReferenceEquals(_hardCircleTex, null)) m.mainTexture = _hardCircleTex;
             else if (!ReferenceEquals(_decalTex, null)) m.mainTexture = _decalTex;
-            _dripMatCache[col] = m;
+            _dripMatCache[key] = m;
+            BloodThermal.RegisterMaterial(m, key, true);
             return m;
         }
 
@@ -630,6 +661,7 @@ namespace BloodSystem
             var brightList = new List<float>();
             var normList   = new List<Vector3>();
             var wList      = new List<float>();
+            var densList   = new List<float>();
             float cumul  = 0f;
 
             foreach (var tex in textures)
@@ -638,9 +670,16 @@ namespace BloodSystem
                 Color[] pixels = tex.GetPixels();
                 float ar = (float)w / h;
 
+                // How densely packed with blood each pixel's neighbourhood is. Thick pooled areas
+                // hold heat far longer than a fine mist of separated droplets, so this is what
+                // decides which cooling curve a ray ends up on. Baked here, once, at startup —
+                // the CDF is static, so there is nothing left to work out at projection time.
+                float[] density = BuildDensityMap(pixels, w, h);
+
                 var imgUVs   = new List<Vector2>(w * h / 4);
                 var imgDarks = new List<float>(w * h / 4);
                 var imgWts   = new List<float>(w * h / 4);
+                var imgDens  = new List<float>(w * h / 4);
                 float imgTotal = 0f;
 
                 for (int py = 0; py < h; py++)
@@ -669,6 +708,7 @@ namespace BloodSystem
                     imgUVs.Add(new Vector2(u, v));
                     imgDarks.Add(1f - lum);
                     imgWts.Add(wt);
+                    imgDens.Add(density[py * w + px]);
                     imgTotal += wt;
                 }
 
@@ -682,6 +722,7 @@ namespace BloodSystem
                     darkList.Add(imgDarks[i]);
                     brightList.Add(LookupNoiseBright(imgUVs[i]));
                     normList.Add(LookupNormal(imgUVs[i]));
+                    densList.Add(imgDens[i]);
                     wList.Add(cumul);
                 }
             }
@@ -691,6 +732,79 @@ namespace BloodSystem
             _splatterBrights = brightList.ToArray();
             _splatterNormals = normList.ToArray();
             _cumWeights      = wList.ToArray();
+            _splatterClasses = BuildCurveClasses(densList);
+        }
+
+        // Separable box blur of the alpha channel — a cheap "how much blood is around this pixel"
+        // measure. Runs once per source PNG at startup.
+        static float[] BuildDensityMap(Color[] pixels, int w, int h)
+        {
+            int r = Mathf.Clamp(BloodThermal.CfgDensityBlur.Value, 1, 16);
+            var src = new float[w * h];
+            for (int i = 0; i < src.Length; i++) src[i] = pixels[i].a;
+
+            var tmp = new float[w * h];
+            // Horizontal
+            for (int y = 0; y < h; y++)
+            {
+                int row = y * w;
+                for (int x = 0; x < w; x++)
+                {
+                    float sum = 0f; int n = 0;
+                    int x0 = Mathf.Max(0, x - r), x1 = Mathf.Min(w - 1, x + r);
+                    for (int xx = x0; xx <= x1; xx++) { sum += src[row + xx]; n++; }
+                    tmp[row + x] = sum / n;
+                }
+            }
+            // Vertical
+            var dst = new float[w * h];
+            for (int x = 0; x < w; x++)
+            {
+                for (int y = 0; y < h; y++)
+                {
+                    float sum = 0f; int n = 0;
+                    int y0 = Mathf.Max(0, y - r), y1 = Mathf.Min(h - 1, y + r);
+                    for (int yy = y0; yy <= y1; yy++) { sum += tmp[yy * w + x]; n++; }
+                    dst[y * w + x] = sum / n;
+                }
+            }
+            return dst;
+        }
+
+        // Splits the sampled pixels into equal-population density classes. Equal population rather
+        // than fixed density thresholds so every class stays populated no matter what PNGs are
+        // loaded — a uniformly dense splatter image would otherwise put every ray in one class.
+        // Class 0 = densest (cools slowest, most linearly), last class = thinnest.
+        static byte[] BuildCurveClasses(List<float> densities)
+        {
+            int n = densities.Count;
+            var result = new byte[n];
+            int classes = BloodThermal.Classes;
+            if (classes <= 1 || n == 0) return result;
+
+            var sorted = densities.ToArray();
+            System.Array.Sort(sorted);
+
+            // cut[c] = density below which a sample falls into class c+1 or later
+            var cut = new float[classes - 1];
+            for (int c = 0; c < classes - 1; c++)
+            {
+                // Densest class takes the TOP slice, so cuts are read from the high end down.
+                int idx = Mathf.Clamp(Mathf.RoundToInt(n * (float)(classes - 1 - c) / classes), 0, n - 1);
+                cut[c] = sorted[idx];
+            }
+
+            for (int i = 0; i < n; i++)
+            {
+                float d = densities[i];
+                byte cls = (byte)(classes - 1);
+                for (int c = 0; c < classes - 1; c++)
+                {
+                    if (d >= cut[c]) { cls = (byte)c; break; }
+                }
+                result[i] = cls;
+            }
+            return result;
         }
 
         static void BuildFallbackGrid(int side)
@@ -714,16 +828,20 @@ namespace BloodSystem
             _splatterBrights = brightList.ToArray();
             _splatterNormals = normList.ToArray();
             _cumWeights      = new float[0];
+            // Uniform grid has no real density structure — put everything on one curve.
+            _splatterClasses = new byte[uvList.Count];
         }
 
-        static void SampleSplatter(out Vector2 uv, out float dark, out float bright, out Vector3 tanNorm)
+        static void SampleSplatter(out Vector2 uv, out float dark, out float bright, out Vector3 tanNorm,
+                                   out byte curveClass)
         {
             if (_splatterUVs == null || _splatterUVs.Length == 0)
             {
-                uv      = new Vector2(UnityEngine.Random.Range(-1f, 1f), UnityEngine.Random.Range(-1f, 1f));
-                dark    = 0.8f;
-                bright  = 1f;
-                tanNorm = Vector3.forward;
+                uv         = new Vector2(UnityEngine.Random.Range(-1f, 1f), UnityEngine.Random.Range(-1f, 1f));
+                dark       = 0.8f;
+                bright     = 1f;
+                tanNorm    = Vector3.forward;
+                curveClass = 0;
                 return;
             }
             int idx;
@@ -742,6 +860,7 @@ namespace BloodSystem
             dark    = (!ReferenceEquals(_splatterDarks,   null) && idx < _splatterDarks.Length)   ? _splatterDarks[idx]   : 0.8f;
             bright  = (!ReferenceEquals(_splatterBrights, null) && idx < _splatterBrights.Length) ? _splatterBrights[idx] : 1f;
             tanNorm = (!ReferenceEquals(_splatterNormals, null) && idx < _splatterNormals.Length)  ? _splatterNormals[idx] : Vector3.forward;
+            curveClass = (!ReferenceEquals(_splatterClasses, null) && idx < _splatterClasses.Length) ? _splatterClasses[idx] : (byte)0;
         }
 
         // ── Alloy material cache (persists across sessions) ───────────────────────
@@ -899,8 +1018,14 @@ namespace BloodSystem
 
         internal static Material GetBloodMat(Color col)
         {
+            return GetBloodMat(col, BloodThermal.CurrentCohort(BloodThermal.Classes - 1));
+        }
+
+        internal static Material GetBloodMat(Color col, int cohortId)
+        {
+            var key = new MatKey(col, cohortId);
             Material m;
-            if (_matCache.TryGetValue(col, out m) && !ReferenceEquals(m, null)) return m;
+            if (_matCache.TryGetValue(key, out m) && !ReferenceEquals(m, null)) return m;
 
             Material src = _decalSourceMat;
             if (ReferenceEquals(src, null))
@@ -914,14 +1039,16 @@ namespace BloodSystem
                 m = new Material(_fallbackDecalShader);
                 if (!ReferenceEquals(_decalTex, null)) m.mainTexture = _decalTex;
                 m.color = col;
-                _matCache[col] = m;
+                _matCache[key] = m;
+                BloodThermal.RegisterMaterial(m, key, false);
                 return m;
             }
 
             m = new Material(src);
             if (!ReferenceEquals(_decalTex, null)) m.mainTexture = _decalTex;
             ApplyBloodProps(m, col);
-            _matCache[col] = m;
+            _matCache[key] = m;
+            BloodThermal.RegisterMaterial(m, key, false);
             return m;
         }
 
@@ -1184,8 +1311,8 @@ namespace BloodSystem
 
                 for (int i = 0; i < N; i++)
                 {
-                    Vector2 uv; float dark; float bright; Vector3 tanNorm;
-                    SampleSplatter(out uv, out dark, out bright, out tanNorm);
+                    Vector2 uv; float dark; float bright; Vector3 tanNorm; byte curveClass;
+                    SampleSplatter(out uv, out dark, out bright, out tanNorm, out curveClass);
 
                     Vector3 dir = gib
                         ? UnityEngine.Random.onUnitSphere
@@ -1224,7 +1351,7 @@ namespace BloodSystem
 
                     Rigidbody hitRb = h.collider.attachedRigidbody;
                     Transform par   = hitRb != null ? hitRb.transform : null;
-                    var dd = new DotData(h.point, h.normal, dotR, dark, bright, tanNorm, elongVec, elong, h.distance);
+                    var dd = new DotData(h.point, h.normal, dotR, dark, bright, tanNorm, elongVec, elong, h.distance, curveClass);
 
                     if (par == null)
                     {
@@ -1305,8 +1432,8 @@ namespace BloodSystem
 
             for (int i = 0; i < N; i++)
             {
-                Vector2 uv; float dark; float bright; Vector3 tanNorm;
-                SampleSplatter(out uv, out dark, out bright, out tanNorm);
+                Vector2 uv; float dark; float bright; Vector3 tanNorm; byte curveClass;
+                SampleSplatter(out uv, out dark, out bright, out tanNorm, out curveClass);
                 Vector3 dir = UnityEngine.Random.onUnitSphere;
 
                 // Gib rays start at the segment's own position, right inside the sosig's remaining
@@ -1333,7 +1460,7 @@ namespace BloodSystem
                     Vector3 elongVec = dir - Vector3.Dot(dir, h.normal) * h.normal;
                     if (elongVec.sqrMagnitude > 0.001f) elongVec.Normalize(); else elongVec = Vector3.right;
 
-                    var dd = new DotData(h.point, h.normal, dotR, dark, bright, tanNorm, elongVec, elong, h.distance);
+                    var dd = new DotData(h.point, h.normal, dotR, dark, bright, tanNorm, elongVec, elong, h.distance, curveClass);
                     Rigidbody rb = h.collider.attachedRigidbody;
                     if (rb == null)
                         staticDots.Add(dd);
@@ -1529,7 +1656,9 @@ namespace BloodSystem
         internal static void SpawnDripStain(Vector3 pos, Vector3 normal, Color col, float scale = 1f)
         {
             col = BrightTint(col);
-            Material mat = GetBloodMat(col);
+            int cohortId = BloodThermal.CurrentCohort(BloodThermal.Classes - 1);
+            BloodThermal.NoteSpawnPosition(cohortId, pos);
+            Material mat = GetBloodMat(col, cohortId);
             if (ReferenceEquals(mat, null)) return;
 
             float r = UnityEngine.Random.Range(0.015f, 0.04f) * scale;
@@ -1554,10 +1683,11 @@ namespace BloodSystem
             var go = new GameObject("DS");
             go.AddComponent<MeshFilter>().mesh = mesh;
             var mr = go.AddComponent<MeshRenderer>();
-            mr.material          = mat;
+            mr.sharedMaterial    = mat;
             mr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
             mr.receiveShadows    = false;
             UnityEngine.Object.Destroy(go, CfgLifetime.Value);
+            BloodThermal.RegisterRenderer(mr, cohortId, pos);
         }
 
         // ── Custom blood drop effect ──────────────────────────────────────────────
@@ -1606,7 +1736,7 @@ namespace BloodSystem
             em.rateOverTime = new ParticleSystem.MinMaxCurve(0f);
             var psr = ps.GetComponent<ParticleSystemRenderer>();
             if (psr != null && !ReferenceEquals(_pelletMat, null))
-            { var dmat = new Material(_pelletMat); dmat.color = col; psr.material = dmat; }
+            { var dmat = new Material(_pelletMat); dmat.color = col; BloodThermal.MarkAlwaysHot(dmat); psr.material = dmat; }
             ps.Play();
             ps.Emit(count);
             UnityEngine.Object.Destroy(go, 6f);
@@ -1711,7 +1841,9 @@ namespace BloodSystem
                 _growingStainLoggedOnce = true;
                 Log.LogInfo("[BloodSystem] SpawnGrowingStain pos=" + pos + " normal=" + normal);
             }
-            Material mat = GetDripMat(col);
+            int cohortId = BloodThermal.CurrentCohort(BloodThermal.Classes - 1);
+            BloodThermal.NoteSpawnPosition(cohortId, pos);
+            Material mat = GetDripMat(col, cohortId);
             if (ReferenceEquals(mat, null)) return;
 
             float r = UnityEngine.Random.Range(0.001f, 0.007f);
@@ -1738,10 +1870,11 @@ namespace BloodSystem
             go.transform.localScale = Vector3.one * r;
             go.AddComponent<MeshFilter>().mesh = mesh;
             var mr = go.AddComponent<MeshRenderer>();
-            mr.material          = mat;
+            mr.sharedMaterial    = mat;
             mr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
             mr.receiveShadows    = false;
             UnityEngine.Object.Destroy(go, CfgLifetime.Value);
+            BloodThermal.RegisterRenderer(mr, cohortId, pos);
         }
 
         // Single stretched stain: one ellipse quad per droplet, elongated along the
@@ -1756,13 +1889,20 @@ namespace BloodSystem
             float elong    = Mathf.Clamp(1f / Mathf.Max(0.15f, sinAngle), 1f, 6f);
 
             // Spray streaks: reduce alpha for long grazing streaks.
+            // Quantized to 5 steps because alpha is part of the material cache key — a continuous
+            // value here means a brand new Material for very nearly every streak. That was always
+            // wasteful; it matters more now that the cache key also carries a cohort id.
             if (sprayStreak)
-                col = new Color(col.r, col.g, col.b,
-                                Mathf.Lerp(0.9f, 0.7f, (elong - 1f) / 5f));
+            {
+                float aT = Mathf.Round(Mathf.Clamp01((elong - 1f) / 5f) * 4f) / 4f;
+                col = new Color(col.r, col.g, col.b, Mathf.Lerp(0.9f, 0.7f, aT));
+            }
 
             col = BrightTint(col);
 
-            Material mat = GetDripMat(col);
+            int cohortId = BloodThermal.CurrentCohort(BloodThermal.Classes - 1);
+            BloodThermal.NoteSpawnPosition(cohortId, origin);
+            Material mat = GetDripMat(col, cohortId);
             if (ReferenceEquals(mat, null)) return;
 
             float r = UnityEngine.Random.Range(0.008f, 0.024f);
@@ -1788,11 +1928,12 @@ namespace BloodSystem
             go.transform.localScale = new Vector3(r * elong * 2f, r * 2f, 1f);
             go.AddComponent<MeshFilter>().sharedMesh = _dotQuadMesh;
             var mr = go.AddComponent<MeshRenderer>();
-            mr.material          = mat;
+            mr.sharedMaterial    = mat;
             mr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
             mr.receiveShadows    = false;
             UnityEngine.Object.Destroy(go, CfgLifetime.Value);
             TrackGO(go, shotList);
+            BloodThermal.RegisterRenderer(mr, cohortId, origin);
         }
 
         // Small round dot left by spray particles — Alloy + soft circle, same look as BD splash dots.
@@ -1800,7 +1941,9 @@ namespace BloodSystem
         internal static void SpawnSprayDot(Vector3 pos, Vector3 normal, Color col)
         {
             col = BrightTint(col);
-            Material mat = GetBloodMat(col);
+            int cohortId = BloodThermal.CurrentCohort(BloodThermal.Classes - 1);
+            BloodThermal.NoteSpawnPosition(cohortId, pos);
+            Material mat = GetBloodMat(col, cohortId);
             if (ReferenceEquals(mat, null) || ReferenceEquals(_dotQuadMesh, null)) return;
 
             float r    = UnityEngine.Random.Range(0.008f, 0.036f);
@@ -1814,11 +1957,12 @@ namespace BloodSystem
             go.transform.localScale = Vector3.one * (r * 2f);
             go.AddComponent<MeshFilter>().sharedMesh = _dotQuadMesh;
             var mr = go.AddComponent<MeshRenderer>();
-            mr.material          = mat;
+            mr.sharedMaterial    = mat;
             mr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
             mr.receiveShadows    = false;
             UnityEngine.Object.Destroy(go, CfgLifetime.Value);
             TrackGO(go, null);
+            BloodThermal.RegisterRenderer(mr, cohortId, pos);
         }
 
         // ── Mesh building ─────────────────────────────────────────────────────────
@@ -1829,9 +1973,16 @@ namespace BloodSystem
 
             // Group dots into brightness buckets. Each bucket gets its own darkened material
             // so the color difference is baked into _Color — no vertex-color dependency.
+            //
+            // Thermal adds a second axis: heat is a per-material value, so dots that cool at
+            // different rates cannot share a mesh. The key becomes brightness × curve class.
+            // With Curve Classes set to 1 (or thermal off) classes==1 and this is identical to
+            // the old brightness-only chunking — no extra draw calls. Empty combinations are
+            // skipped below, so the real chunk count stays well under the worst case.
             float[] levels = { 0.700f, 0.733f, 0.767f, 0.800f, 0.833f, 0.867f, 0.900f, 0.933f, 0.967f, 1.000f };
-            var buckets = new List<int>[levels.Length];
-            for (int i = 0; i < levels.Length; i++) buckets[i] = new List<int>();
+            int classes = BloodThermal.Enabled ? BloodThermal.Classes : 1;
+            var buckets = new List<int>[levels.Length * classes];
+            for (int i = 0; i < buckets.Length; i++) buckets[i] = new List<int>();
 
             for (int i = 0; i < dots.Count; i++)
             {
@@ -1846,20 +1997,29 @@ namespace BloodSystem
                     float dist = Mathf.Abs(total - levels[j]);
                     if (dist < bestDist) { bestDist = dist; best = j; }
                 }
-                buckets[best].Add(i);
+                int cls = d.CurveClass < classes ? d.CurveClass : classes - 1;
+                buckets[best * classes + cls].Add(i);
             }
 
             bool dbgDone = BloodSystemPlugin._dbgDotLogged;
-            for (int b = 0; b < levels.Length; b++)
+            int chunksBuilt = 0;
+            for (int bk = 0; bk < buckets.Length; bk++)
             {
-                if (buckets[b].Count == 0) continue;
+                if (buckets[bk].Count == 0) continue;
+                chunksBuilt++;
+                int b   = bk / classes;
+                int cls = bk % classes;
                 float lv = levels[b];
                 Color matCol = new Color(Mathf.Clamp01(col.r * lv), Mathf.Clamp01(col.g * lv), Mathf.Clamp01(col.b * lv), col.a);
-                Material mat = GetBloodMat(matCol);
+                int cohortId = BloodThermal.CurrentCohort(cls);
+                // Tell the cohort where its blood is before any material is made, so the first
+                // heat value already accounts for local ambient.
+                BloodThermal.NoteSpawnPosition(cohortId, dots[buckets[bk][0]].Pos);
+                Material mat = GetBloodMat(matCol, cohortId);
                 if (ReferenceEquals(mat, null)) continue;
 
                 const int MAX = 16383;
-                int total2 = buckets[b].Count;
+                int total2 = buckets[bk].Count;
                 for (int start = 0; start < total2; start += MAX)
                 {
                     int count = Mathf.Min(MAX, total2 - start);
@@ -1870,7 +2030,7 @@ namespace BloodSystem
 
                     for (int i = 0; i < count; i++)
                     {
-                        DotData d    = dots[buckets[b][start + i]];
+                        DotData d    = dots[buckets[bk][start + i]];
                         Vector3 norm = d.Norm;
                         float   r    = d.R;
 
@@ -1918,17 +2078,22 @@ namespace BloodSystem
                     if (parent != null) go.transform.SetParent(parent, false);
                     go.AddComponent<MeshFilter>().mesh = mesh;
                     var mr = go.AddComponent<MeshRenderer>();
-                    mr.material          = mat;
+                    // sharedMaterial, not material: the cached material IS the shared cooling
+                    // state that BloodThermal writes to. Assigning through .material risks Unity
+                    // handing this renderer a private copy, which would silently detach it from
+                    // its cohort and leave it stuck at whatever heat it spawned with.
+                    mr.sharedMaterial    = mat;
                     mr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
                     mr.receiveShadows    = false;
                     UnityEngine.Object.Destroy(go, CfgLifetime.Value);
                     TrackGO(go, shotList);
+                    BloodThermal.RegisterRenderer(mr, cohortId, dots[buckets[bk][start]].Pos);
 
                     if (!dbgDone)
                     {
                         dbgDone = true;
                         BloodSystemPlugin._dbgDotLogged = true;
-                        DotData d0 = dots[buckets[b][start]];
+                        DotData d0 = dots[buckets[bk][start]];
                         Vector3 wp = parent != null ? parent.TransformPoint(verts[0]) : verts[0];
                         BloodSystemPlugin.Log.LogInfo("[BloodSystem] DBG dot[0] worldPos=" + wp
                             + " r=" + d0.R + " norm=" + d0.Norm
@@ -1938,6 +2103,7 @@ namespace BloodSystem
                     }
                 }
             }
+            BloodThermal.DebugNoteChunks(chunksBuilt, dots.Count);
         }
 
         // ── Blood color resolution ────────────────────────────────────────────────
@@ -2183,6 +2349,34 @@ namespace BloodSystem
                 dirty = true;
             }
             if (dirty) _ps.SetParticles(_buf, n);
+        }
+    }
+
+    // ── Thermal arming ────────────────────────────────────────────────────────────
+    //
+    // Every thermal render in the game funnels through PIPScope.ApplyCameraShader — both the
+    // scope path (PIPScope's own render loop) and the standalone handheld/head-mounted
+    // ThermalNVCamera. Postfixing it is the one reliable "a thermal camera is actually being used"
+    // signal, and it lets the whole blood-heat system stay completely dormant until then.
+    //
+    // Deliberately NOT gated on PIPScope.temperatureRenderingEnabled: that flag is raised
+    // mid-render and cleared again in the same frame, so it always reads false from an Update.
+    //
+    // Top-level (not nested inside BloodSystemPatches) and patched by its own explicit PatchAll
+    // call — Harmony's PatchAll(Type) only processes the type it is handed, not nested types.
+    [HarmonyPatch]
+    static class ThermalArmHook
+    {
+        static bool Prepare() { return AccessTools.TypeByName("PIPScope") != null; }
+        static MethodBase TargetMethod()
+        {
+            var t = AccessTools.TypeByName("PIPScope");
+            if (t == null) return null;
+            return AccessTools.Method(t, "ApplyCameraShader");
+        }
+        static void Postfix(bool isThermal)
+        {
+            if (isThermal) BloodThermal.Arm();
         }
     }
 
