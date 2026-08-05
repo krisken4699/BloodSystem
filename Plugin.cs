@@ -2890,14 +2890,17 @@ namespace BloodSystem
             static void Postfix(Component __instance)
             {
                 if (_grabbed) return;
-                // Deliberately NOT skipping when _decalSourceMat is already set. It usually is —
-                // alloy_mat.cache / the scene scan fill it in at startup — but that material is
-                // only chosen for looking right in normal rendering. Thermal picks its SubShader
-                // by the shader's RenderType tag, which is fixed in the shader and cannot be
-                // changed from a Material, so a source whose RenderType is Opaque gets drawn as a
-                // solid quad with alpha ignored: a black square around every blood dot. The game's
-                // own bullet-hole decal does not have that problem, which is the whole reason to
-                // prefer its material here. Grab it even if we already have something.
+
+                // Only ever a LAST RESORT, never a preference. Grabbing this material when we
+                // already had a working one produced four bullet holes in the corners of every
+                // blood decal: the game's impact-decal material is Alloy, whose albedo is
+                // _ColorRGBOpacityA and holds a 2x2 atlas of bullet holes. Setting
+                // Material.mainTexture only writes _MainTex, so the atlas kept being sampled and
+                // each decal's 0..1 UVs spanned all four holes. Fixing that properly means
+                // rewriting every Alloy albedo slot, which is not worth it — the cached/scene
+                // material already works, and the thermal square was a RenderType tag problem
+                // (see SetOverrideTag in ApplyBloodProps), not a source-material problem.
+                if (!ReferenceEquals(BloodSystemPlugin._decalSourceMat, null)) { _grabbed = true; return; }
                 try
                 {
                     var r = __instance.GetComponent<Renderer>();
