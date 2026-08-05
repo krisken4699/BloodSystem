@@ -40,6 +40,10 @@ namespace BloodSystem
 
     internal static class BloodThermal
     {
+        // Hard ceiling on curve classes. Also the stride used to build cohort ids, so it must
+        // never be lowered below the configured class count.
+        const int MAX_CLASSES = 6;
+
         // ── Shader property names (must match ObjectTemperature.ApplyTemperature) ──
         const string P_INTENSITY   = "_ThermalIntensity";
         const string P_TRANSVIS    = "_ThermalTransparentVisibility";
@@ -83,10 +87,10 @@ namespace BloodSystem
                 "How long blood takes to finish cooling and settle at the surrounding temperature. This is the WHOLE cooldown, not a half life - at this many seconds the blood is done and reads the same as the wall it is on. Replaces the old 'Cooling Half Life Seconds', which was the time to lose only half the heat and therefore took about 6x this long to actually finish.");
             CfgSteps = cfg.Bind("Thermal", "Temperature Steps", 18,
                 "How many discrete temperature shades blood passes through on its way to ambient. Nothing is computed per frame - these are solved once at startup and stepped through, so raising this costs almost nothing and makes the cooldown read as a smooth fade instead of visible jumps. 2-18.");
-            CfgCohortWindow = cfg.Bind("Thermal", "Cohort Window Seconds", 10f,
-                "Blood spawned within this many seconds of other blood shares one cooling schedule and one set of materials. Lower = each splat cools on its own exact timeline but more materials are held at once; higher = fewer materials. This is what bounds memory as Lifetime goes up, so it is deliberately NOT tied to Temperature Steps.");
-            CfgClasses = cfg.Bind("Thermal", "Curve Classes", 2,
-                "How many cooling-rate groups splash dots are split into by how densely packed with blood they are. 1 = every dot cools identically and costs nothing extra. 2 = dense areas cool slower and more linearly, thin spray follows Newton and cools faster. Each class beyond 1 splits the splash mesh into more chunks (more draw calls). 1-4.");
+            CfgCohortWindow = cfg.Bind("Thermal", "Cohort Window Seconds", 0.5f,
+                "Blood spawned within this many seconds of other blood shares one cooling schedule, and therefore picks up that schedule's progress instead of starting fresh. Keep it well under Cooling Seconds: if it is comparable, a second shot lands in a cohort that has already half cooled and its new blood appears part-cooled or snaps straight to cold. Raising it groups more blood together and holds fewer materials at once; lowering it makes every burst cool on its own timeline. Blood fired in the same burst shares a cohort either way, so this costs nothing during sustained fire.");
+            CfgClasses = cfg.Bind("Thermal", "Curve Classes", 5,
+                "How many cooling-rate groups splash dots are split into by how densely packed with blood they are. The densest group cools slowest and most linearly (a thick pool has thermal mass and sheds heat at a near-constant rate); the thinnest cools fastest and follows Newton's curve; everything between is blended smoothly across the range. 1 = every dot cools identically and costs nothing extra. Each class beyond 1 splits the splash mesh into more chunks, so this is the main draw-call cost of the thermal system. 1-6.");
             CfgDenseLinearity = cfg.Bind("Thermal", "Dense Linearity", 0.75f,
                 "How linear the densest class's cooling curve is. 0 = pure exponential like thin blood, 1 = fully linear (a thick pool losing heat at a near-constant rate). Ignored when Curve Classes is 1.");
             CfgSparseCoolMult = cfg.Bind("Thermal", "Sparse Cool Multiplier", 1.6f,
@@ -160,8 +164,9 @@ namespace BloodSystem
         }
 
         static readonly Dictionary<int, Cohort> _cohorts = new Dictionary<int, Cohort>();
-        static readonly List<Cohort> _live = new List<Cohort>();
-        static readonly List<Cohort> _retire = new List<Cohort>();
+        static readonly List<Cohort> _live   = new List<Cohort>(); // still cooling
+        static readonly List<Cohort> _done   = new List<Cohort>(); // cooled, holding materials
+        static readonly List<Cohort> _retire = new List<Cohort>(); // scratch, cleared each use
         static float _nextEvent = float.MaxValue;
 
         static bool _armed;
@@ -184,7 +189,7 @@ namespace BloodSystem
             _forcedValue = CfgDebugForce.Value;
             _forced      = _forcedValue >= 0f;
 
-            _classes = Mathf.Clamp(CfgClasses.Value, 1, 4);
+            _classes = Mathf.Clamp(CfgClasses.Value, 1, MAX_CLASSES);
             _steps   = Mathf.Clamp(CfgSteps.Value,   2, 18);
             _hotOffset = CfgFreshIntensity.Value;
 
@@ -209,6 +214,7 @@ namespace BloodSystem
 
             _cohorts.Clear();
             _live.Clear();
+            _done.Clear();
             _nextEvent = float.MaxValue;
             _armed = false;
 
@@ -330,7 +336,7 @@ namespace BloodSystem
         {
             if (!CfgDebugLog.Value) return;
             BloodSystemPlugin.Log.LogInfo("[BloodSystem] Thermal: splash built " + chunkCount
-                + " chunk(s) for " + dotCount + " dots (live cohorts=" + _live.Count
+                + " chunk(s) for " + dotCount + " dots (cooling=" + _live.Count + " cooled=" + _done.Count
                 + " materials=" + BloodSystemPlugin._matCache.Count + ")");
         }
 
@@ -411,7 +417,11 @@ namespace BloodSystem
             if (curveClass >= _classes) curveClass = _classes - 1;
 
             int quantumIndex = Mathf.FloorToInt(Time.time / _quantum);
-            int id = quantumIndex * 4 + curveClass;   // 4 = max classes, keeps ids unique
+            // Must be the hard class cap, not the configured count: a smaller stride makes ids
+            // from different time windows collide, silently merging blood spawned seconds apart
+            // into one cohort. This was hardcoded to 4 while the cap was 4, so raising the cap
+            // would have broken it.
+            int id = quantumIndex * MAX_CLASSES + curveClass;
 
             Cohort co;
             if (!_cohorts.TryGetValue(id, out co))
@@ -624,6 +634,7 @@ namespace BloodSystem
             }
             // Catch up everything that spawned while unarmed.
             for (int i = 0; i < _live.Count; i++) ApplyCohort(_live[i]);
+            for (int i = 0; i < _done.Count; i++) ApplyCohort(_done[i]);
         }
 
         // ── Per-frame ─────────────────────────────────────────────────────────────
@@ -640,11 +651,15 @@ namespace BloodSystem
             float next = float.MaxValue;
             _retire.Clear();
 
-            for (int i = 0; i < _live.Count; i++)
+            // Only cohorts that still have steps left are walked here. Finished ones are moved to
+            // _done, which is scanned separately for material destruction - otherwise this loop
+            // would grow with the decal Lifetime (every cohort is kept alive until its decals
+            // die, long after it stopped cooling) instead of with the far shorter cooling time.
+            for (int i = _live.Count - 1; i >= 0; i--)
             {
                 Cohort co = _live[i];
 
-                if (now >= co.RetireTime) { _retire.Add(co); continue; }
+                if (now >= co.RetireTime) { _live.RemoveAt(i); _retire.Add(co); continue; }
 
                 bool stepped = false;
                 while (co.Step < _steps - 1 && now >= co.NextEvent)
@@ -670,8 +685,25 @@ namespace BloodSystem
                     }
                 }
 
+                // Done cooling: park it until its decals expire so it stops costing anything.
+                if (co.Step >= _steps - 1)
+                {
+                    _live.RemoveAt(i);
+                    _done.Add(co);
+                    if (co.RetireTime < next) next = co.RetireTime;
+                    continue;
+                }
+
                 if (co.NextEvent < next) next = co.NextEvent;
             }
+
+            // Created in time order, so retire times are ascending and only the head can be due.
+            while (_done.Count > 0 && now >= _done[0].RetireTime)
+            {
+                _retire.Add(_done[0]);
+                _done.RemoveAt(0);
+            }
+            if (_done.Count > 0 && _done[0].RetireTime < next) next = _done[0].RetireTime;
 
             for (int i = 0; i < _retire.Count; i++) Retire(_retire[i]);
             _retire.Clear();
@@ -750,7 +782,10 @@ namespace BloodSystem
             co.Mats.Clear();
             co.Renderers.Clear();
             _cohorts.Remove(co.Id);
+            // Retire is only ever reached via the Tick lists, which have already removed it from
+            // whichever one held it; these are belt-and-braces for any future direct caller.
             _live.Remove(co);
+            _done.Remove(co);
         }
     }
 
