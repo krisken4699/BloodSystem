@@ -2344,6 +2344,97 @@ namespace BloodSystem
             BloodThermal.DebugNoteChunks(chunksBuilt, dots.Count);
         }
 
+        // ── Surface probe (wound-soak groundwork) ─────────────────────────────────
+        //
+        // Fires once, on the first sosig hit, and reports what the body and its clothing are
+        // actually made of. Every way of putting a stain ON a curved surface depends on facts the
+        // decompiled source does not carry - it only exposes base types (SosigLink.C is a
+        // Collider, SubRenderer is a Renderer); the real types live in prefabs:
+        //
+        //   textureCoord   - painting into the texture needs the hit's UV, and Unity only fills
+        //                    RaycastHit.textureCoord for a MeshCollider. Primitive colliders
+        //                    return (0,0) and rule the approach out entirely.
+        //   renderer type  - SkinnedMeshRenderer means a mesh-conforming decal has to re-bake as
+        //                    the body deforms; MeshRenderer means it can be built once.
+        //   readable       - painting also needs the source texture readable, or a RenderTexture
+        //                    blit path instead.
+        //   triangle count - the cost of building a decal that follows the surface.
+        static bool _surfaceProbed;
+
+        internal static void ProbeSurfaceOnce(SosigLink link, Damage d)
+        {
+            if (_surfaceProbed) return;
+            _surfaceProbed = true;
+            try
+            {
+                var sb = new System.Text.StringBuilder();
+                sb.Append("[BloodSystem] SURFACE PROBE");
+
+                Collider c = link.C;
+                sb.Append("\n  link collider: ").Append(ReferenceEquals(c, null) ? "null" : c.GetType().Name);
+
+                // Can we get a UV from a raycast onto this body at all?
+                Vector3 origin = d.point - d.strikeDir.normalized * 0.25f;
+                RaycastHit rh = default(RaycastHit);
+                bool gotHit = !ReferenceEquals(c, null) && c.Raycast(new Ray(origin, d.strikeDir.normalized), out rh, 1f);
+                if (gotHit)
+                    sb.Append("\n  raycast ok: textureCoord=").Append(rh.textureCoord)
+                      .Append(" normal=").Append(rh.normal)
+                      .Append(rh.textureCoord == Vector2.zero ? "  (ZERO - no MeshCollider, UV painting NOT possible)" : "  (UV usable)");
+                else
+                    sb.Append("\n  raycast onto link collider MISSED");
+
+                Renderer lr = link.SubRenderer;
+                AppendRendererInfo(sb, "link renderer", lr);
+
+                // Clothing/armour on this link, which is what decides soak vs bare-skin trickle.
+                var wearables = link.GetComponentsInChildren<SosigWearable>();
+                sb.Append("\n  wearables on link: ").Append(wearables.Length);
+                for (int i = 0; i < wearables.Length && i < 3; i++)
+                {
+                    var w = wearables[i];
+                    sb.Append("\n    '").Append(w.DisplayName).Append("'");
+                    AppendRendererInfo(sb, "      rend", w.OverrideRendMain ?? w.GetComponent<Renderer>());
+                    sb.Append("\n      cols: ").Append(w.Cols == null ? 0 : w.Cols.Count);
+                    if (w.Cols != null && w.Cols.Count > 0 && !ReferenceEquals(w.Cols[0], null))
+                        sb.Append(" first=").Append(w.Cols[0].GetType().Name);
+                }
+
+                Log.LogInfo(sb.ToString());
+            }
+            catch (Exception ex) { Log.LogWarning("[BloodSystem] SURFACE PROBE: " + ex); }
+        }
+
+        static void AppendRendererInfo(System.Text.StringBuilder sb, string label, Renderer r)
+        {
+            sb.Append("\n  ").Append(label).Append(": ");
+            if (ReferenceEquals(r, null)) { sb.Append("null"); return; }
+            sb.Append(r.GetType().Name);
+
+            Mesh m = null;
+            var smr = r as SkinnedMeshRenderer;
+            if (!ReferenceEquals(smr, null)) m = smr.sharedMesh;
+            else
+            {
+                var mf = r.GetComponent<MeshFilter>();
+                if (!ReferenceEquals(mf, null)) m = mf.sharedMesh;
+            }
+            if (!ReferenceEquals(m, null))
+                sb.Append(" mesh='").Append(m.name).Append("' verts=").Append(m.vertexCount)
+                  .Append(" tris=").Append(m.triangles.Length / 3)
+                  .Append(" readable=").Append(m.isReadable);
+            else sb.Append(" mesh=null");
+
+            Material mat = r.sharedMaterial;
+            if (!ReferenceEquals(mat, null))
+            {
+                sb.Append(" shader='").Append(mat.shader.name).Append("'");
+                Texture t = mat.mainTexture;
+                sb.Append(" mainTex=").Append(ReferenceEquals(t, null) ? "null"
+                    : t.name + " " + t.width + "x" + t.height);
+            }
+        }
+
         // ── Blood color resolution ────────────────────────────────────────────────
 
         internal static Color GetSosigBloodColor(Sosig s)
@@ -2860,6 +2951,8 @@ namespace BloodSystem
                         + " strikeDir=" + d.strikeDir + " sourcePoint=" + d.Source_Point
                         + " point=" + d.point);
                 }
+
+                BloodSystemPlugin.ProbeSurfaceOnce(__instance, d);
 
                 // Direction: d.strikeDir first; fall back to tracker direction or source→hit vector
                 Vector3 sDir;
