@@ -8,6 +8,8 @@ Stupidly exaggerated blood visuals! When a bullet physically exits a sosig, it p
 - **Spray** — Quick particle burst at the exit wound. Gib explosions fire a 360° burst with lifetime and velocity scaled to bullet entry speed.
 - **Drip stain** — Vanilla sosig blood drip particles are hooked at runtime. When a drip lands on a static surface (floor, wall) it spawns a cluster of blood drops with a smoothstep soft edge. Drips landing on dynamic objects (guns, other sosigs, moving RBs) are skipped.
 
+[![Thermal blood](https://img.youtube.com/vi/4qH6SSDcCzI/0.jpg)](https://youtube.com/shorts/4qH6SSDcCzI)
+
 [![Trailer video by VRVoyager!](https://img.youtube.com/vi/a_Bakg5ogp4/0.jpg)](https://www.youtube.com/watch?v=a_Bakg5ogp4)
 
 ## Blood color

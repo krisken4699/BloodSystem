@@ -31,7 +31,7 @@ namespace BloodSystem
         }
     }
 
-    [BepInPlugin("h3vr.invent60.bloodsystem", "Blood System", "3.3.4")]
+    [BepInPlugin("h3vr.invent60.bloodsystem", "Blood System", "3.4.0")]
     // Soft dependency (no hard requirement, no compile-time reference to Aiyke's assembly) purely
     // to control load order: if Aiyke IS installed, BepInEx loads it before us, so its Harmony
     // patches already exist by the time our Awake runs TryOverrideAiykePenetration below.
@@ -339,7 +339,7 @@ namespace BloodSystem
             harmony.PatchAll(typeof(ThermalArmHook));
             harmony.PatchAll(typeof(BloodSystemPatches.WfxDecalMaterialGrab));
             harmony.PatchAll(typeof(BloodSystemPatches.OnslaughtNaturalDeathPatch));
-            Log.LogInfo("[BloodSystem] 3.3.4 loaded. FieldsOK=" + BloodSystemPatches.Ok);
+            Log.LogInfo("[BloodSystem] 3.4.0 loaded. FieldsOK=" + BloodSystemPatches.Ok);
 
             bool aiykePresent = BepInEx.Bootstrap.Chainloader.PluginInfos.ContainsKey("Aiyke.code_mod");
             if (aiykePresent)

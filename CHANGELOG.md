@@ -1,3 +1,6 @@
+## 3.4.0
+- Now works with thermals. Blood temperature starts at 36°C and slowly cools down to 20°C.
+
 ## 3.3.4
 - Fixed: splatter could fail to appear on a real penetrating hit — most noticeable on headshots. The exit-wound raycasts started just behind the bullet's exit point and fanned out into a cone; on a small target like a head that cone easily clipped back into the sosig's own geometry, and a hit on your own sosig killed that ray outright instead of continuing on to whatever was actually behind it (the wall). Rays now pass through the sosig (and its weapon) that fired them and keep going until they find the real surface, same as the gib-explosion burst.
 
