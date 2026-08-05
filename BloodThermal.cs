@@ -86,8 +86,8 @@ namespace BloodSystem
                 "Temperature blood cools toward. H3VR has NO ambient temperature of any kind - no per-map, per-area or per-surface temperature exists in the game - so this has to be set here. Once blood reaches it, it is indistinguishable from the wall it is on.");
             CfgCoolSeconds = cfg.Bind("Thermal", "Cooling Seconds", 8f,
                 "How long blood takes to finish cooling and settle at the surrounding temperature. This is the WHOLE cooldown, not a half life - at this many seconds the blood is done and reads the same as the wall it is on. Replaces the old 'Cooling Half Life Seconds', which was the time to lose only half the heat and therefore took about 6x this long to actually finish.");
-            CfgSteps = cfg.Bind("Thermal", "Temperature Steps", 40,
-                "How many discrete temperature shades blood passes through on its way to ambient. The shades are evenly spaced in temperature, so this is directly how fine the fade looks - 40 means each step is about 1/40th of the total brightness drop. The whole schedule is solved once at startup and then only replayed, so a step costs one number written per material and nothing is ever computed per frame. 2-64.");
+            CfgSteps = cfg.Bind("Thermal", "Temperature Steps", 80,
+                "How many discrete temperature shades blood passes through on its way to ambient. The shades are evenly spaced in temperature, so this is directly how fine the fade looks - 80 means each step is about 1/80th of the total brightness drop. The whole schedule is solved once at startup and then only replayed, so a step costs one number written per material and nothing is ever computed per frame. Raise it if the fade still looks stepped. 2-160.");
             CfgCohortWindow = cfg.Bind("Thermal", "Cohort Window Seconds", 0.5f,
                 "Blood spawned within this many seconds of other blood shares one cooling schedule, and therefore picks up that schedule's progress instead of starting fresh. Keep it well under Cooling Seconds: if it is comparable, a second shot lands in a cohort that has already half cooled and its new blood appears part-cooled or snaps straight to cold. Raising it groups more blood together and holds fewer materials at once; lowering it makes every burst cool on its own timeline. Blood fired in the same burst shares a cohort either way, so this costs nothing during sustained fire.");
             CfgClasses = cfg.Bind("Thermal", "Curve Classes", 5,
@@ -193,7 +193,7 @@ namespace BloodSystem
             _forced      = _forcedValue >= 0f;
 
             _classes = Mathf.Clamp(CfgClasses.Value, 1, MAX_CLASSES);
-            _steps   = Mathf.Clamp(CfgSteps.Value,   2, 64);
+            _steps   = Mathf.Clamp(CfgSteps.Value,   2, 160);
             _hotOffset = CfgFreshIntensity.Value;
 
             // Celsius is only here so the config reads sensibly - the game has no temperature

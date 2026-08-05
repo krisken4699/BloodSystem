@@ -789,6 +789,50 @@ namespace BloodSystem
             _splatterNormals = normList.ToArray();
             _cumWeights      = wList.ToArray();
             _splatterClasses = BuildCurveClasses(densList);
+            LogClassDistribution(densList);
+        }
+
+        // Checks the density classes actually mean what they are meant to mean.
+        //
+        // A sample's UV becomes a RAY DIRECTION: uv near (0,0) fires down the cone axis and lands
+        // in the middle of the splash, large |uv| fires wide and lands out at the edge. Density is
+        // measured from the source PNG at that same UV. So "the packed middle cools last, the
+        // scattered outside cools first" only holds if the dense pixels really are the ones near
+        // the middle of the artwork — which is a property of the PNGs, not of this code, and is
+        // worth seeing rather than assuming. Mean radius rising with class index means it works.
+        static void LogClassDistribution(List<float> densities)
+        {
+            try
+            {
+                int classes = BloodThermal.Classes;
+                if (_splatterClasses == null || _splatterClasses.Length == 0) return;
+
+                var count = new int[classes];
+                var sumR  = new double[classes];
+                var sumD  = new double[classes];
+                for (int i = 0; i < _splatterClasses.Length; i++)
+                {
+                    int c = _splatterClasses[i];
+                    if (c >= classes) c = classes - 1;
+                    count[c]++;
+                    sumR[c] += _splatterUVs[i].magnitude;
+                    sumD[c] += densities[i];
+                }
+
+                var sb = new System.Text.StringBuilder();
+                sb.Append("[BloodSystem] Density classes (0=densest, cools slowest):");
+                for (int c = 0; c < classes; c++)
+                {
+                    sb.Append("\n  class ").Append(c).Append(": ").Append(count[c]).Append(" samples (")
+                      .Append((100f * count[c] / _splatterClasses.Length).ToString("F1")).Append("%)");
+                    if (count[c] > 0)
+                        sb.Append("  meanDensity=").Append((sumD[c] / count[c]).ToString("F3"))
+                          .Append("  meanRadius=").Append((sumR[c] / count[c]).ToString("F3"));
+                }
+                sb.Append("\n  meanRadius should RISE with class index if the packed middle is class 0.");
+                Log.LogInfo(sb.ToString());
+            }
+            catch (Exception ex) { Log.LogWarning("[BloodSystem] LogClassDistribution: " + ex.Message); }
         }
 
         // Separable box blur of the alpha channel — a cheap "how much blood is around this pixel"
