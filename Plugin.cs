@@ -773,9 +773,19 @@ namespace BloodSystem
                     System.Array.Sort(dSorted);
                     float dLo = dSorted[Mathf.Clamp((int)(dSorted.Length * 0.02f), 0, dSorted.Length - 1)];
                     float dHi = dSorted[Mathf.Clamp((int)(dSorted.Length * 0.98f), 0, dSorted.Length - 1)];
+
+                    // Anchor the top of the range so normalization cannot INVENT a dense core.
+                    // Rescaling purely against the image's own maximum guarantees something lands
+                    // in the slowest-cooling group no matter what the image actually contains - so
+                    // a splatter made entirely of thin spray had its heaviest wisps promoted to
+                    // "thick pool" and held heat like one. Holding the top at a real coverage
+                    // figure means a thin image simply never reaches the top classes, while an
+                    // image that genuinely does have thick areas still normalizes against itself.
+                    dHi = Mathf.Max(dHi, BloodThermal.DenseAnchor);
+
                     float dRange = dHi - dLo;
                     for (int i = 0; i < imgDens.Count; i++)
-                        imgDens[i] = dRange > 1e-5f ? Mathf.Clamp01((imgDens[i] - dLo) / dRange) : 0.5f;
+                        imgDens[i] = dRange > 1e-5f ? Mathf.Clamp01((imgDens[i] - dLo) / dRange) : 0f;
                 }
 
                 float norm = 1f / imgTotal;
@@ -866,30 +876,39 @@ namespace BloodSystem
             catch (Exception ex) { Log.LogWarning("[BloodSystem] LogClassDistribution: " + ex.Message); }
         }
 
-        // Separable box blur. Shared by both passes of BuildDensityMap.
+        // Separable box blur with a sliding window — each output pixel adds the value entering the
+        // window and subtracts the one leaving, so the cost is the same whatever the radius. The
+        // naive version reread the whole window per pixel, which made a large radius unaffordable
+        // and is why the radius used to be a handful of pixels.
         static float[] BoxBlur(float[] src, int w, int h, int r)
         {
             var tmp = new float[w * h];
             for (int y = 0; y < h; y++)
             {
                 int row = y * w;
+                float sum = 0f; int n = 0;
+                int hi = Mathf.Min(w - 1, r);
+                for (int i = 0; i <= hi; i++) { sum += src[row + i]; n++; }
                 for (int x = 0; x < w; x++)
                 {
-                    float sum = 0f; int n = 0;
-                    int x0 = Mathf.Max(0, x - r), x1 = Mathf.Min(w - 1, x + r);
-                    for (int xx = x0; xx <= x1; xx++) { sum += src[row + xx]; n++; }
                     tmp[row + x] = sum / n;
+                    int add = x + r + 1, rem = x - r;
+                    if (add < w)  { sum += src[row + add]; n++; }
+                    if (rem >= 0) { sum -= src[row + rem]; n--; }
                 }
             }
             var dst = new float[w * h];
             for (int x = 0; x < w; x++)
             {
+                float sum = 0f; int n = 0;
+                int hi = Mathf.Min(h - 1, r);
+                for (int i = 0; i <= hi; i++) { sum += tmp[i * w + x]; n++; }
                 for (int y = 0; y < h; y++)
                 {
-                    float sum = 0f; int n = 0;
-                    int y0 = Mathf.Max(0, y - r), y1 = Mathf.Min(h - 1, y + r);
-                    for (int yy = y0; yy <= y1; yy++) { sum += tmp[yy * w + x]; n++; }
                     dst[y * w + x] = sum / n;
+                    int add = y + r + 1, rem = y - r;
+                    if (add < h)  { sum += tmp[add * w + x]; n++; }
+                    if (rem >= 0) { sum -= tmp[rem * w + x]; n--; }
                 }
             }
             return dst;
@@ -913,7 +932,16 @@ namespace BloodSystem
         //   opaque with plenty around it, 90%     mean 0.90  frag 1.0  ->  0.81   most linear
         static float[] BuildDensityMap(Color[] pixels, int w, int h)
         {
-            int r = Mathf.Clamp(BloodThermal.DensityBlur, 1, 16);
+            // The window has to be WIDER THAN A DROPLET, or an isolated droplet reads as a solid
+            // mass: the window sits entirely inside it, sees nothing but opaque pixels, measures
+            // zero variance and reports maximum density. That is how scattered spray was ending up
+            // in the slowest-cooling group. A fixed 4px radius was a 9x9 window on a 1024-1200px
+            // splatter image, where a droplet is comfortably 20-60px across - it could never see
+            // the empty space around one. Scaling with the image keeps the measurement meaningful
+            // whatever resolution someone drops in, and the sliding-window blur makes the larger
+            // radius free.
+            int r = Mathf.Max(BloodThermal.DensityBlur,
+                              Mathf.RoundToInt(Mathf.Min(w, h) * BloodThermal.DensityBlurFraction));
             float fw = Mathf.Clamp01(BloodThermal.FragmentWeight);
 
             var a   = new float[w * h];
