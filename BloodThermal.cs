@@ -57,6 +57,7 @@ namespace BloodSystem
         internal static ConfigEntry<float>  CfgAmbientTempC;
         internal static ConfigEntry<float>  CfgHalfLife;
         internal static ConfigEntry<int>    CfgSteps;
+        internal static ConfigEntry<float>  CfgCohortWindow;
         internal static ConfigEntry<int>    CfgClasses;
         internal static ConfigEntry<float>  CfgDenseLinearity;
         internal static ConfigEntry<float>  CfgSparseCoolMult;
@@ -78,10 +79,12 @@ namespace BloodSystem
                 "Temperature blood leaves the body at, in Celsius. Purely a readability knob - H3VR has no real temperature units, this is converted to the game's arbitrary thermal scale.");
             CfgAmbientTempC = cfg.Bind("Thermal", "Ambient Temperature C", 20f,
                 "Temperature blood cools toward. H3VR has NO ambient temperature of any kind - no per-map, per-area or per-surface temperature exists in the game - so this has to be set here. Once blood reaches it, it is indistinguishable from the wall it is on.");
-            CfgHalfLife = cfg.Bind("Thermal", "Cooling Half Life Seconds", 8f,
-                "Seconds for blood to lose half its heat above ambient (Newton's law of cooling). Lower = cools faster.");
-            CfgSteps = cfg.Bind("Thermal", "Temperature Steps", 12,
-                "How many discrete temperature shades blood passes through on its way to ambient. Nothing is computed per frame - these are solved once at startup and stepped through. Higher = smoother but more update events. 2-32.");
+            CfgHalfLife = cfg.Bind("Thermal", "Cooling Half Life Seconds", 20f,
+                "Seconds for blood to lose half its heat above ambient (Newton's law of cooling). Lower = cools faster. Sized so cooling plays out over a good part of the decal's lifetime instead of finishing in the first few seconds.");
+            CfgSteps = cfg.Bind("Thermal", "Temperature Steps", 24,
+                "How many discrete temperature shades blood passes through on its way to ambient. Nothing is computed per frame - these are solved once at startup and stepped through, so raising this costs almost nothing and makes the cooldown read as a smooth fade instead of visible jumps. 2-64.");
+            CfgCohortWindow = cfg.Bind("Thermal", "Cohort Window Seconds", 10f,
+                "Blood spawned within this many seconds of other blood shares one cooling schedule and one set of materials. Lower = each splat cools on its own exact timeline but more materials are held at once; higher = fewer materials. This is what bounds memory as Lifetime goes up, so it is deliberately NOT tied to Temperature Steps.");
             CfgClasses = cfg.Bind("Thermal", "Curve Classes", 2,
                 "How many cooling-rate groups splash dots are split into by how densely packed with blood they are. 1 = every dot cools identically and costs nothing extra. 2 = dense areas cool slower and more linearly, thin spray follows Newton and cools faster. Each class beyond 1 splits the splash mesh into more chunks (more draw calls). 1-4.");
             CfgDenseLinearity = cfg.Bind("Thermal", "Dense Linearity", 0.75f,
@@ -182,7 +185,7 @@ namespace BloodSystem
             _forced      = _forcedValue >= 0f;
 
             _classes = Mathf.Clamp(CfgClasses.Value, 1, 4);
-            _steps   = Mathf.Clamp(CfgSteps.Value,   2, 32);
+            _steps   = Mathf.Clamp(CfgSteps.Value,   2, 64);
             _hotOffset = CfgFreshIntensity.Value;
 
             // Celsius is only here so the config reads sensibly - the game has no temperature
@@ -197,9 +200,12 @@ namespace BloodSystem
 
             BuildStepTables();
 
-            // One cohort window per step keeps the live cohort count (and therefore the material
-            // count) bounded at roughly Steps * colours * classes.
-            _quantum = Mathf.Max(0.25f, BloodSystemPlugin.CfgLifetime.Value / _steps);
+            // Deliberately independent of Steps. Tying the two together meant raising Steps for a
+            // smoother fade also multiplied the number of live cohorts, and therefore materials,
+            // for no benefit — the schedule inside a cohort can have as many steps as it likes
+            // without needing more cohorts. Live cohorts are now Lifetime / window, so this is the
+            // one knob that bounds memory as Lifetime grows.
+            _quantum = Mathf.Max(0.25f, CfgCohortWindow.Value);
 
             _cohorts.Clear();
             _live.Clear();
