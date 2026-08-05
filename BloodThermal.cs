@@ -42,7 +42,7 @@ namespace BloodSystem
     {
         // Hard ceiling on curve classes. Also the stride used to build cohort ids, so it must
         // never be lowered below the configured class count.
-        const int MAX_CLASSES = 6;
+        const int MAX_CLASSES = 20;
 
         // ── Shader property names (must match ObjectTemperature.ApplyTemperature) ──
         const string P_INTENSITY   = "_ThermalIntensity";
@@ -63,6 +63,9 @@ namespace BloodSystem
         internal static ConfigEntry<int>    CfgSteps;
         internal static ConfigEntry<float>  CfgCohortWindow;
         internal static ConfigEntry<int>    CfgClasses;
+        internal static ConfigEntry<float>  CfgFragmentWeight;
+        internal static ConfigEntry<bool>   CfgStagger;
+        internal static ConfigEntry<bool>   CfgStaggerOutward;
         internal static ConfigEntry<float>  CfgDenseLinearity;
         internal static ConfigEntry<float>  CfgTailLinearity;
         internal static ConfigEntry<float>  CfgSparseCoolMult;
@@ -93,8 +96,14 @@ namespace BloodSystem
                 "How many discrete temperature shades blood passes through on its way to ambient. The shades are evenly spaced in temperature, so this is directly how fine the fade looks - 80 means each step is about 1/80th of the total brightness drop. The whole schedule is solved once at startup and then only replayed, so a step costs one number written per material and nothing is ever computed per frame. Raise it if the fade still looks stepped. 2-160.");
             CfgCohortWindow = cfg.Bind("Thermal", "Cohort Window Seconds", 0.5f,
                 "Blood spawned within this many seconds of other blood shares one cooling schedule, and therefore picks up that schedule's progress instead of starting fresh. Keep it well under Cooling Seconds: if it is comparable, a second shot lands in a cohort that has already half cooled and its new blood appears part-cooled or snaps straight to cold. Raising it groups more blood together and holds fewer materials at once; lowering it makes every burst cool on its own timeline. Blood fired in the same burst shares a cohort either way, so this costs nothing during sustained fire.");
-            CfgClasses = cfg.Bind("Thermal", "Curve Classes", 5,
-                "How many cooling-rate groups splash dots are split into by how densely packed with blood they are. The densest group cools slowest and most linearly (a thick pool has thermal mass and sheds heat at a near-constant rate); the thinnest cools fastest and follows Newton's curve; everything between is blended smoothly across the range. 1 = every dot cools identically and costs nothing extra. Each class beyond 1 splits the splash mesh into more chunks, so this is the main draw-call cost of the thermal system. 1-6.");
+            CfgFragmentWeight = cfg.Bind("Thermal", "Fragmentation Weight", 1f,
+                "How much scattered blood is treated as thinner than solid blood covering the same area. A fine spray of separate droplets and one continuous translucent sheet can cover the same fraction of a surface, but the droplets shed heat far faster. 1 = full effect, 0 = judge on coverage alone and ignore whether the blood is connected.");
+            CfgStagger = cfg.Bind("Thermal", "Stagger Classes", true,
+                "Cool the density groups one at a time in a wave instead of the whole splat changing shade at once. Each group's schedule is offset by an equal fraction of one step, so by the time the last group updates the first is due again with exactly the same gap - the splat is always mid-transition somewhere rather than flipping as a block.");
+            CfgStaggerOutward = cfg.Bind("Thermal", "Stagger Outward", false,
+                "Direction of the cooling wave. Off: the dense middle updates first and the wave runs outward to the thin edges. On: the thin outside updates first and the wave runs inward. Only matters when Stagger Classes is on.");
+            CfgClasses = cfg.Bind("Thermal", "Curve Classes", 8,
+                "How many cooling-rate groups splash dots are split into by how densely packed with blood they are. The densest group cools slowest and most linearly (a thick pool has thermal mass and sheds heat at a near-constant rate); the thinnest cools fastest and follows Newton's curve; everything between is blended smoothly across the range. More groups means a finer gradient across the splat and, with Stagger Classes on, a smoother wave. COST: the splash mesh is split into one chunk per brightness level per class, so draw calls per shot are about 10x this number - 8 classes is roughly 80. Watch the chunk count in the log with Debug Logging on, and lower Max shot groups if it costs too much. 1-20.");
             CfgDenseLinearity = cfg.Bind("Thermal", "Dense Linearity", 0.75f,
                 "How linear the densest class's cooling curve is. 0 = pure exponential like thin blood, 1 = fully linear (a thick pool losing heat at a near-constant rate). Ignored when Curve Classes is 1.");
             CfgTailLinearity = cfg.Bind("Thermal", "Tail Linearity Floor", 0.3f,
@@ -404,6 +413,19 @@ namespace BloodSystem
                 // exp(-4) = 0.018, i.e. ~98% cooled at tau, which is close enough to call settled.
                 float k = 4f / tau;
 
+                // Stagger: shift each class's whole schedule by an equal slice of one step, so the
+                // density groups update one after another in a wave instead of the entire splat
+                // changing shade in the same instant. The slice is 1/classes of this class's own
+                // average step, which is what makes the cadence seamless - by the time the last
+                // group has updated, the first is due again with exactly that same gap, so the
+                // splat is always mid-transition somewhere and never flips as a block.
+                float phase = 0f;
+                if (CfgStagger.Value && _classes > 1)
+                {
+                    int order = CfgStaggerOutward.Value ? (_classes - 1 - c) : c;
+                    phase = (tau / (_steps - 1)) * order / _classes;
+                }
+
                 _stepTime[c] = new float[_steps];
                 _heatFrac[c] = new float[_steps];
 
@@ -422,7 +444,7 @@ namespace BloodSystem
                 {
                     float frac = 1f - (float)i / (_steps - 1);
                     _heatFrac[c][i] = frac;
-                    _stepTime[c][i] = (i == 0) ? 0f : SolveTime(frac, k, tau, linearity);
+                    _stepTime[c][i] = (i == 0) ? 0f : SolveTime(frac, k, tau, linearity) + phase;
                 }
             }
         }

@@ -866,16 +866,10 @@ namespace BloodSystem
             catch (Exception ex) { Log.LogWarning("[BloodSystem] LogClassDistribution: " + ex.Message); }
         }
 
-        // Separable box blur of the alpha channel — a cheap "how much blood is around this pixel"
-        // measure. Runs once per source PNG at startup.
-        static float[] BuildDensityMap(Color[] pixels, int w, int h)
+        // Separable box blur. Shared by both passes of BuildDensityMap.
+        static float[] BoxBlur(float[] src, int w, int h, int r)
         {
-            int r = Mathf.Clamp(BloodThermal.CfgDensityBlur.Value, 1, 16);
-            var src = new float[w * h];
-            for (int i = 0; i < src.Length; i++) src[i] = pixels[i].a;
-
             var tmp = new float[w * h];
-            // Horizontal
             for (int y = 0; y < h; y++)
             {
                 int row = y * w;
@@ -887,7 +881,6 @@ namespace BloodSystem
                     tmp[row + x] = sum / n;
                 }
             }
-            // Vertical
             var dst = new float[w * h];
             for (int x = 0; x < w; x++)
             {
@@ -898,6 +891,52 @@ namespace BloodSystem
                     for (int yy = y0; yy <= y1; yy++) { sum += tmp[yy * w + x]; n++; }
                     dst[y * w + x] = sum / n;
                 }
+            }
+            return dst;
+        }
+
+        // How much thermal mass sits around each pixel. Runs once per source PNG at startup.
+        //
+        // Opacity alone is not enough, and neither is average coverage. Blurred alpha gives the
+        // same 0.30 for a fine spray of opaque droplets covering 30% of the area as it does for one
+        // solid sheet drawn at 30% opacity, yet separate droplets should shed heat fast while a
+        // continuous sheet holds it. What separates them is the VARIANCE inside the window:
+        // scattered droplets swing between fully opaque and empty, a translucent sheet is flat.
+        //
+        // Variance alone flips the wrong way at high coverage though - 90% opaque with a few holes
+        // has exactly the same raw variance as 10% scattered dots, and would be written off as
+        // thin. So fragmentation is weighted by how much empty space there is (1 - mean): once
+        // blood covers most of the area the droplets are touching anyway and it behaves as a mass.
+        //
+        //   scattered opaque droplets, 10% area   mean 0.10  frag 1.0  ->  0.01   cools fastest
+        //   solid sheet at 30% opacity            mean 0.30  frag 0.0  ->  0.30   linear
+        //   opaque with plenty around it, 90%     mean 0.90  frag 1.0  ->  0.81   most linear
+        static float[] BuildDensityMap(Color[] pixels, int w, int h)
+        {
+            int r = Mathf.Clamp(BloodThermal.CfgDensityBlur.Value, 1, 16);
+            float fw = Mathf.Clamp01(BloodThermal.CfgFragmentWeight.Value);
+
+            var a   = new float[w * h];
+            var aSq = new float[w * h];
+            for (int i = 0; i < a.Length; i++)
+            {
+                float v = pixels[i].a;
+                a[i]   = v;
+                aSq[i] = v * v;
+            }
+
+            float[] mean   = BoxBlur(a,   w, h, r);
+            float[] meanSq = BoxBlur(aSq, w, h, r);
+
+            var dst = new float[w * h];
+            for (int i = 0; i < dst.Length; i++)
+            {
+                float m   = mean[i];
+                float var = Mathf.Max(0f, meanSq[i] - m * m);
+                // Largest variance possible at this coverage - fully binary opaque/empty.
+                float maxVar = m * (1f - m);
+                float frag = maxVar > 1e-5f ? Mathf.Clamp01(var / maxVar) : 0f;
+                dst[i] = m * (1f - fw * frag * (1f - m));
             }
             return dst;
         }
