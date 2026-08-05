@@ -256,7 +256,12 @@ namespace BloodSystem
                     PIPScope.thermalAmbientIntensity = CfgAmbientOverride.Value;
 
                 string scene = UnityEngine.SceneManagement.SceneManager.GetActiveScene().name;
-                if (!_diagLoggedScenes.Add(scene)) return;
+                // Keyed on the decal source too, not just the scene: that material gets swapped
+                // when the WFX bullet-hole grab fires, which usually happens after the first
+                // thermal render, and its RenderType is the thing being diagnosed.
+                Material src = BloodSystemPlugin._decalSourceMat;
+                string key = scene + "|" + (ReferenceEquals(src, null) ? "none" : src.shader.name);
+                if (!_diagLoggedScenes.Add(key)) return;
 
                 var sb = new System.Text.StringBuilder();
                 sb.Append("[BloodSystem] THERMAL DIAG scene='").Append(scene).Append("'");
@@ -292,6 +297,15 @@ namespace BloodSystem
                           ? -1 : ObjectTemperature.allTemperatureObjects.Count);
                 sb.Append(" TemperatureVolumes=")
                   .Append(TemperatureVolume.volumes == null ? -1 : TemperatureVolume.volumes.Count);
+
+                // RenderType is what SetReplacementShader(shader, "RenderType") matches on, so it
+                // decides whether blood is drawn with alpha or as a solid quad. Opaque here means
+                // a square around every dot no matter what the heat map says.
+                Material dsm = BloodSystemPlugin._decalSourceMat;
+                sb.Append(" | decalSrc=")
+                  .Append(ReferenceEquals(dsm, null)
+                          ? "none"
+                          : dsm.shader.name + " RenderType=" + dsm.GetTag("RenderType", false, "<none>"));
 
                 sb.Append(" | ambientLight=").Append(RenderSettings.ambientLight)
                   .Append(" ambientIntensity=").Append(RenderSettings.ambientIntensity.ToString("F2"));

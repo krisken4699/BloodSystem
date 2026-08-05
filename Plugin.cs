@@ -2849,19 +2849,36 @@ namespace BloodSystem
             static void Postfix(Component __instance)
             {
                 if (_grabbed) return;
-                if (!ReferenceEquals(BloodSystemPlugin._decalSourceMat, null)) { _grabbed = true; return; }
+                // Deliberately NOT skipping when _decalSourceMat is already set. It usually is —
+                // alloy_mat.cache / the scene scan fill it in at startup — but that material is
+                // only chosen for looking right in normal rendering. Thermal picks its SubShader
+                // by the shader's RenderType tag, which is fixed in the shader and cannot be
+                // changed from a Material, so a source whose RenderType is Opaque gets drawn as a
+                // solid quad with alpha ignored: a black square around every blood dot. The game's
+                // own bullet-hole decal does not have that problem, which is the whole reason to
+                // prefer its material here. Grab it even if we already have something.
                 try
                 {
                     var r = __instance.GetComponent<Renderer>();
                     if (ReferenceEquals(r, null) || ReferenceEquals(r.sharedMaterial, null)) return;
+
+                    Material prev = BloodSystemPlugin._decalSourceMat;
+                    string prevDesc = ReferenceEquals(prev, null)
+                        ? "none"
+                        : prev.shader.name + " RenderType=" + prev.GetTag("RenderType", false, "<none>");
+
                     BloodSystemPlugin._decalSourceMat = new Material(r.sharedMaterial);
                     BloodSystemPlugin._decalSourceMat.SetInt("_Cull", 0);
                     BloodSystemPlugin._decalSourceSearched = true;
                     BloodSystemPlugin._matCache.Clear();
                     BloodSystemPlugin._dripMatCache.Clear();
                     _grabbed = true;
+                    // RenderType is what the thermal replacement shader keys on, so it is the
+                    // field worth seeing in the log when blood renders as a square.
                     BloodSystemPlugin.Log.LogInfo("[BloodSystem] WFX mat grabbed on decal Start: "
-                        + r.sharedMaterial.shader.name);
+                        + r.sharedMaterial.shader.name
+                        + " RenderType=" + r.sharedMaterial.GetTag("RenderType", false, "<none>")
+                        + " (replaced: " + prevDesc + ")");
                 }
                 catch (Exception ex)
                 {
