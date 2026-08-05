@@ -64,6 +64,7 @@ namespace BloodSystem
         internal static ConfigEntry<float>  CfgCohortWindow;
         internal static ConfigEntry<int>    CfgClasses;
         internal static ConfigEntry<float>  CfgDenseLinearity;
+        internal static ConfigEntry<float>  CfgTailLinearity;
         internal static ConfigEntry<float>  CfgSparseCoolMult;
         internal static ConfigEntry<float>  CfgFreshIntensity;
         internal static ConfigEntry<bool>   CfgUseVolumes;
@@ -93,6 +94,8 @@ namespace BloodSystem
                 "How many cooling-rate groups splash dots are split into by how densely packed with blood they are. The densest group cools slowest and most linearly (a thick pool has thermal mass and sheds heat at a near-constant rate); the thinnest cools fastest and follows Newton's curve; everything between is blended smoothly across the range. 1 = every dot cools identically and costs nothing extra. Each class beyond 1 splits the splash mesh into more chunks, so this is the main draw-call cost of the thermal system. 1-6.");
             CfgDenseLinearity = cfg.Bind("Thermal", "Dense Linearity", 0.75f,
                 "How linear the densest class's cooling curve is. 0 = pure exponential like thin blood, 1 = fully linear (a thick pool losing heat at a near-constant rate). Ignored when Curve Classes is 1.");
+            CfgTailLinearity = cfg.Bind("Thermal", "Tail Linearity Floor", 0.3f,
+                "Stops the very last shade from lingering. A pure exponential flattens as it nears the surrounding temperature, so the final step before blood goes cold hangs for about 1.7s while the average step is 0.2s. Mixing in this much straight-line cooling keeps the tail descending steadily: 0.15 cuts that gap to 0.88s, 0.3 to 0.56s, 0.75 to 0.27s. Only the thinnest classes are affected in practice, since denser ones already carry more of it through Dense Linearity. 0 = pure Newton, long tail back.");
             CfgSparseCoolMult = cfg.Bind("Thermal", "Sparse Cool Multiplier", 1.6f,
                 "How much faster the thinnest class cools than the densest. 1 = same speed. Ignored when Curve Classes is 1.");
             CfgFreshIntensity = cfg.Bind("Thermal", "Fresh Blood Thermal Intensity", 27f,
@@ -364,7 +367,16 @@ namespace BloodSystem
             {
                 // u: 0 = densest class, 1 = thinnest
                 float u = (_classes == 1) ? 0f : (float)c / (_classes - 1);
-                float linearity = Mathf.Clamp01(CfgDenseLinearity.Value) * (1f - u);
+                // Blends from the dense class's linearity down to a FLOOR rather than to zero.
+                // A pure exponential barely moves as it nears ambient - its slope at tau is only
+                // -0.009/s - so the final shade before cold used to hang for ~1.7s while every
+                // other step landed inside 0.9s. A straight line descends at a constant rate, so
+                // a small amount of it mixed in keeps the tail moving: slope at tau goes to about
+                // -0.027/s and the last gap drops to ~0.6s. It only alters the last few percent of
+                // the schedule, where the blood is nearly indistinguishable from the wall anyway.
+                float denseLin = Mathf.Clamp01(CfgDenseLinearity.Value);
+                float tailLin  = Mathf.Clamp01(CfgTailLinearity.Value);
+                float linearity = Mathf.Lerp(tailLin, Mathf.Max(denseLin, tailLin), 1f - u);
                 // Thin blood finishes sooner, not merely faster at the start - so the multiplier
                 // shortens its whole schedule rather than only steepening its curve.
                 float tau = baseTau / Mathf.Lerp(1f, Mathf.Max(0.05f, CfgSparseCoolMult.Value), u);
