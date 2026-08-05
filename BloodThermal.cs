@@ -55,92 +55,46 @@ namespace BloodSystem
         const string P_VERTEXCOLOR = "_ThermalUseVertexColor";
 
         // ── Config ────────────────────────────────────────────────────────────────
-        internal static ConfigEntry<bool>   CfgOn;
-        internal static ConfigEntry<bool>   CfgKeepWarm;
-        internal static ConfigEntry<float>  CfgStartTempC;
-        internal static ConfigEntry<float>  CfgAmbientTempC;
-        internal static ConfigEntry<float>  CfgCoolSeconds;
-        internal static ConfigEntry<int>    CfgSteps;
-        internal static ConfigEntry<float>  CfgCohortWindow;
-        internal static ConfigEntry<int>    CfgClasses;
-        internal static ConfigEntry<float>  CfgFragmentWeight;
-        internal static ConfigEntry<bool>   CfgStagger;
-        internal static ConfigEntry<bool>   CfgStaggerOutward;
-        internal static ConfigEntry<float>  CfgDenseLinearity;
-        internal static ConfigEntry<float>  CfgTailLinearity;
-        internal static ConfigEntry<float>  CfgSparseCoolMult;
-        internal static ConfigEntry<float>  CfgFreshIntensity;
-        internal static ConfigEntry<bool>   CfgUseVolumes;
-        internal static ConfigEntry<string> CfgDensityMode;
-        internal static ConfigEntry<float>  CfgDensityMin;
-        internal static ConfigEntry<float>  CfgDensityMax;
-        internal static ConfigEntry<int>    CfgDensityBlur;
-        internal static ConfigEntry<bool>   CfgOpaqueInThermal;
-        internal static ConfigEntry<float>  CfgHeatMapStrength;
-        internal static ConfigEntry<string> CfgApplyMode;
-        internal static ConfigEntry<float>  CfgDebugForce;
+        //
+        // ONE user-facing option. Everything below it is a tuned constant, on purpose: these
+        // values were arrived at together by testing, they interact (the cohort window only works
+        // while it stays well under the cooldown; the step count only reads smoothly because the
+        // shades are spaced by temperature; the tail floor only matters because the curve is
+        // exponential), and exposing them invites combinations that look worse than the default
+        // with no way for a player to know why.
+        internal static ConfigEntry<bool> CfgAnimate;
 
         internal static void BindConfig(ConfigFile cfg)
         {
-            CfgOn = cfg.Bind("Thermal", "Thermal Blood Enabled", true,
-                "Whether blood decals show up on thermal optics and cool down over time. Off = blood is invisible through thermal (vanilla behaviour) and none of this system runs.");
-            CfgKeepWarm = cfg.Bind("Thermal", "Keep Blood Warm Forever", false,
-                "On: blood stays at fresh body temperature for its whole lifetime and never cools. Cheapest possible mode - nothing is ever updated after spawn.");
-            CfgStartTempC = cfg.Bind("Thermal", "Blood Start Temperature C", 36f,
-                "Temperature blood leaves the body at, in Celsius. Purely a readability knob - H3VR has no real temperature units, this is converted to the game's arbitrary thermal scale.");
-            CfgAmbientTempC = cfg.Bind("Thermal", "Ambient Temperature C", 20f,
-                "Temperature blood cools toward. H3VR has NO ambient temperature of any kind - no per-map, per-area or per-surface temperature exists in the game - so this has to be set here. Once blood reaches it, it is indistinguishable from the wall it is on.");
-            CfgCoolSeconds = cfg.Bind("Thermal", "Cooling Seconds", 8f,
-                "How long blood takes to finish cooling and settle at the surrounding temperature. This is the WHOLE cooldown, not a half life - at this many seconds the blood is done and reads the same as the wall it is on. Replaces the old 'Cooling Half Life Seconds', which was the time to lose only half the heat and therefore took about 6x this long to actually finish.");
-            CfgSteps = cfg.Bind("Thermal", "Temperature Steps", 80,
-                "How many discrete temperature shades blood passes through on its way to ambient. The shades are evenly spaced in temperature, so this is directly how fine the fade looks - 80 means each step is about 1/80th of the total brightness drop. The whole schedule is solved once at startup and then only replayed, so a step costs one number written per material and nothing is ever computed per frame. Raise it if the fade still looks stepped. 2-160.");
-            CfgCohortWindow = cfg.Bind("Thermal", "Cohort Window Seconds", 0.5f,
-                "Blood spawned within this many seconds of other blood shares one cooling schedule, and therefore picks up that schedule's progress instead of starting fresh. Keep it well under Cooling Seconds: if it is comparable, a second shot lands in a cohort that has already half cooled and its new blood appears part-cooled or snaps straight to cold. Raising it groups more blood together and holds fewer materials at once; lowering it makes every burst cool on its own timeline. Blood fired in the same burst shares a cohort either way, so this costs nothing during sustained fire.");
-            CfgFragmentWeight = cfg.Bind("Thermal", "Fragmentation Weight", 1f,
-                "How much scattered blood is treated as thinner than solid blood covering the same area. A fine spray of separate droplets and one continuous translucent sheet can cover the same fraction of a surface, but the droplets shed heat far faster. 1 = full effect, 0 = judge on coverage alone and ignore whether the blood is connected.");
-            CfgStagger = cfg.Bind("Thermal", "Stagger Classes", true,
-                "Cool the density groups one at a time in a wave instead of the whole splat changing shade at once. Each group's schedule is offset by an equal fraction of one step, so by the time the last group updates the first is due again with exactly the same gap - the splat is always mid-transition somewhere rather than flipping as a block.");
-            CfgStaggerOutward = cfg.Bind("Thermal", "Stagger Outward", false,
-                "Direction of the cooling wave. Off: the dense middle updates first and the wave runs outward to the thin edges. On: the thin outside updates first and the wave runs inward. Only matters when Stagger Classes is on.");
-            CfgClasses = cfg.Bind("Thermal", "Curve Classes", 8,
-                "How many cooling-rate groups splash dots are split into by how densely packed with blood they are. The densest group cools slowest and most linearly (a thick pool has thermal mass and sheds heat at a near-constant rate); the thinnest cools fastest and follows Newton's curve; everything between is blended smoothly across the range. More groups means a finer gradient across the splat and, with Stagger Classes on, a smoother wave. COST: the splash mesh is split into one chunk per brightness level per class, so draw calls per shot are about 10x this number - 8 classes is roughly 80. Watch the chunk count in the log with Debug Logging on, and lower Max shot groups if it costs too much. 1-20.");
-            CfgDenseLinearity = cfg.Bind("Thermal", "Dense Linearity", 0.75f,
-                "How linear the densest class's cooling curve is. 0 = pure exponential like thin blood, 1 = fully linear (a thick pool losing heat at a near-constant rate). Ignored when Curve Classes is 1.");
-            CfgTailLinearity = cfg.Bind("Thermal", "Tail Linearity Floor", 0.3f,
-                "Stops the very last shade from lingering. A pure exponential flattens as it nears the surrounding temperature, so the final step before blood goes cold hangs for about 1.7s while the average step is 0.2s. Mixing in this much straight-line cooling keeps the tail descending steadily: 0.15 cuts that gap to 0.88s, 0.3 to 0.56s, 0.75 to 0.27s. Only the thinnest classes are affected in practice, since denser ones already carry more of it through Dense Linearity. 0 = pure Newton, long tail back.");
-            CfgSparseCoolMult = cfg.Bind("Thermal", "Sparse Cool Multiplier", 1.6f,
-                "How much faster the thinnest class cools than the densest. 1 = same speed. Ignored when Curve Classes is 1.");
-            CfgFreshIntensity = cfg.Bind("Thermal", "Fresh Blood Thermal Intensity", 27f,
-                "How bright fresh blood reads above its surroundings on thermal, in the game's own units. 27 matches a Sosig body (ObjectTemperature profile SosigBody). Raise to make fresh blood glow harder.");
-            CfgUseVolumes = cfg.Bind("Thermal", "Use Temperature Volumes", true,
-                "Sample any TemperatureVolume the map author placed to decide local ambient temperature, instead of always using Ambient Temperature C. Sampled once per group of blood when it spawns, never per frame. Most H3VR maps have no volumes at all, in which case this costs nothing.");
-            CfgDensityMode = cfg.Bind("Thermal", "Density Mode", "Normalized",
-                "How a dot's thickness is judged when deciding how fast it cools. Normalized: each splatter image is measured against its own thinnest and thickest areas, so its densest parts always become the slowest-cooling class and its scattered edges the fastest - any image dropped into the mod folder works without touching anything. Absolute: thickness is compared against the fixed Density Class Min/Max below, so the same reading always means the same class in every image, and an image made only of fine mist correctly stays entirely in the fast-cooling classes. Normalized is the safer default because thickness is measured from image alpha, and the same splatter drawn at a lower opacity reads as thinner everywhere while being structurally identical.");
-            CfgDensityMin = cfg.Bind("Thermal", "Density Class Min", 0.05f,
-                "Only used when Density Mode is Absolute. Blood at or below this thickness is treated as the thinnest class - scattered droplets, cools fastest. Thickness is how much of a dot's surroundings in the source image is blood, so 0.05 means about 5% covered. Check the log for the real distribution of your images before changing it.");
-            CfgDensityMax = cfg.Bind("Thermal", "Density Class Max", 0.6f,
-                "Only used when Density Mode is Absolute. Blood at or above this thickness is treated as the densest class - pooled blood, cools slowest and most linearly. The range between this and Density Class Min is split evenly among the classes between.");
-            CfgDensityBlur = cfg.Bind("Thermal", "Density Blur Radius", 4,
-                "Pixel radius used when measuring how densely packed with blood each part of the source splatter PNGs is. Larger = coarser dense/thin split. Only read once at startup while building the splatter sampling table. 1-16.");
-            CfgOpaqueInThermal = cfg.Bind("Thermal", "Render Blood Opaque In Thermal", false,
-                "Draw blood as solid heat on thermal instead of alpha-blending it. Leave OFF: blood decals are transparent quads, so turning this on makes their fully-transparent corners draw as solid heat and every splat shows up on thermal as a big square instead of a soft round blob.");
-            CfgHeatMapStrength = cfg.Bind("Thermal", "Heat Shape Strength", 1f,
-                "How strongly the decal's own texture shapes its heat on thermal (feeds _ThermalHeatMap). 1 = heat falls off with the same soft round edge you see outside thermal. 0 = flat heat across the whole quad, which looks like a square. Raise above 1 to make the hot core stand out more against the faded edge.");
-            CfgApplyMode = cfg.Bind("Thermal", "Apply Mode", "Material",
-                "How heat is pushed to decals. Material: one write updates every decal sharing that material (fastest, default). PropertyBlock: writes each decal renderer individually via MaterialPropertyBlock, the same route the game's own ObjectTemperature uses. Only switch to PropertyBlock if blood does not show up on thermal at all in Material mode.");
-            CfgDebugForce = cfg.Bind("Thermal", "Debug Force Intensity", -1f,
-                "Diagnostic. -1 = off (normal cooling). 0 or higher = pin every blood decal at that thermal intensity forever, ignoring all cooling. Set to 27 to check whether blood shows up on thermal at all without waiting for or fighting the cooling curve.");
-            CfgShapeMode = cfg.Bind("Thermal", "Shape Mode", "HeatMap",
-                "How a decal's heat is delivered, which decides whether its square quad is visible on thermal. HeatMap: the decal sits at ambient heat and ALL of its warmth is painted through its shape texture, so the transparent corners read exactly like the wall behind them and only the round blob is hot. Intensity: the whole quad is heated and the texture only modulates it, which leaves a visible square around every splat. Use HeatMap.");
-            CfgAmbientOverride = cfg.Bind("Thermal", "Thermal Ambient Intensity Override", -1f,
-                "Fixes thermal showing a flat white image in custom maps. The thermal shader adds the scene's ambient light into the heat value, so a map whose Ambient Color is not black washes everything out to white. Vanilla maps ship black ambient, which is why they look right. -1 = leave the game alone. 0 = cancel the ambient contribution entirely (try this first). 1 = the game's own untouched value. This is global, not per-map. Proper fix is to set Ambient Color to black in the map's own lighting settings.");
-            CfgDebugLog = cfg.Bind("Thermal", "Debug Logging", false,
-                "Log the baked cooling schedule at startup, then every cooling step and every splash chunk count as they happen. For checking the system is actually working and how much it costs. Noisy - leave off for normal play.");
+            CfgAnimate = cfg.Bind("Thermal", "Animate Cooldown", true,
+                "Whether blood cools down on thermal optics. On: blood leaves the body hot and fades to the temperature of its surroundings over about eight seconds, thicker pooled areas holding their heat longer than scattered spray. Off: blood still shows up on thermal at body temperature but stays there for as long as the decal lasts, and none of the cooling machinery runs at all.");
         }
 
-        internal static ConfigEntry<bool>   CfgDebugLog;
-        internal static ConfigEntry<float>  CfgAmbientOverride;
-        internal static ConfigEntry<string> CfgShapeMode;
+        // ── Tuned constants ───────────────────────────────────────────────────────
+        const float  COOL_SECONDS     = 8f;    // whole cooldown, fresh to surroundings
+        const int    STEPS            = 80;    // shades on the way down, spaced evenly in temperature
+        const float  COHORT_WINDOW    = 0.5f;  // blood within this long shares a schedule
+        const int    CLASSES          = 8;     // density groups; draw calls are ~10x this per shot
+        const float  FRAGMENT_WEIGHT  = 1f;    // how much scattered blood counts as thinner
+        const bool   STAGGER          = true;  // groups cool in a wave, not as one block
+        const bool   STAGGER_OUTWARD  = false; // dense middle leads the wave
+        const float  DENSE_LINEARITY  = 0.75f; // thickest group's curve, 1 = straight line
+        const float  TAIL_LINEARITY   = 0.3f;  // keeps the last shade from lingering
+        const float  SPARSE_COOL_MULT = 1.6f;  // thinnest group finishes this much sooner
+        const float  FRESH_INTENSITY  = 27f;   // matches ObjectTemperature's SosigBody
+        const float  START_TEMP_C     = 36f;
+        const float  AMBIENT_TEMP_C   = 20f;
+        const bool   USE_VOLUMES      = true;  // honour map-authored TemperatureVolumes
+        const int    DENSITY_BLUR     = 4;     // pixel radius when measuring thickness
+        const bool   OPAQUE_IN_THERMAL = false; // true re-squares the decals
+        const float  HEATMAP_STRENGTH = 1f;
+        const bool   SHAPE_VIA_HEATMAP = true;  // paint heat through the shape texture
+        const bool   USE_PROPERTY_BLOCK = false; // Material path; confirmed working in-game
+
+        // Diagnostics. Flip in source when investigating; deliberately not player-facing.
+        const bool   DEBUG_LOG        = false;
+        const float  DEBUG_FORCE      = -1f;   // >= 0 pins every decal at that intensity
+        const float  AMBIENT_OVERRIDE = -1f;   // >= 0 overrides PIPScope.thermalAmbientIntensity
 
         // ── Baked step tables ─────────────────────────────────────────────────────
         // _stepTime[class][i] = seconds after spawn at which step i is applied
@@ -160,17 +114,16 @@ namespace BloodSystem
 
         internal static int Classes { get { return _classes; } }
 
-        // True when each image's densities should be rescaled against its own range before
-        // banding. Read directly from config so it is correct during startup CDF construction,
-        // which runs before Init().
-        internal static bool NormalizeDensity
-        {
-            get
-            {
-                return !string.Equals(CfgDensityMode.Value, "Absolute",
-                                      System.StringComparison.OrdinalIgnoreCase);
-            }
-        }
+        // Each image's densities are rescaled against its own range before banding, so its
+        // thickest areas always become the slowest-cooling group and its scattered edges the
+        // fastest. Fixed rather than optional: thickness is read from image alpha, and the same
+        // splatter drawn at a lower opacity reads thinner everywhere while being structurally
+        // identical - so any absolute threshold would need retuning per image, and these PNGs are
+        // meant to be swapped by dropping new files into the plugin folder.
+        internal const bool NormalizeDensity = true;
+
+        internal const float FragmentWeight = FRAGMENT_WEIGHT;
+        internal const int   DensityBlur    = DENSITY_BLUR;
         internal static bool Enabled { get { return _enabled; } }
 
         // ── Cohorts ───────────────────────────────────────────────────────────────
@@ -213,28 +166,29 @@ namespace BloodSystem
 
         internal static void Init()
         {
-            _enabled  = CfgOn.Value;
-            _keepWarm = CfgKeepWarm.Value;
-            _usePropertyBlock = string.Equals(CfgApplyMode.Value, "PropertyBlock",
-                                              System.StringComparison.OrdinalIgnoreCase);
-            _shapeViaHeatMap  = !string.Equals(CfgShapeMode.Value, "Intensity",
-                                               System.StringComparison.OrdinalIgnoreCase);
-            _forcedValue = CfgDebugForce.Value;
+            _enabled  = true;
+            _keepWarm = !CfgAnimate.Value;
+            _usePropertyBlock = USE_PROPERTY_BLOCK;
+            _shapeViaHeatMap  = SHAPE_VIA_HEATMAP;
+            _forcedValue = DEBUG_FORCE;
             _forced      = _forcedValue >= 0f;
 
-            _classes = Mathf.Clamp(CfgClasses.Value, 1, MAX_CLASSES);
-            _steps   = Mathf.Clamp(CfgSteps.Value,   2, 160);
-            _hotOffset = CfgFreshIntensity.Value;
+            // With the cooldown off every dot holds the same constant heat forever, so splitting
+            // the splash mesh by density would only cost draw calls - one chunk per brightness per
+            // class - to describe a difference that never appears. Collapse to a single class.
+            _classes = _keepWarm ? 1 : Mathf.Clamp(CLASSES, 1, MAX_CLASSES);
+            _steps   = Mathf.Clamp(STEPS,   2, 160);
+            _hotOffset = FRESH_INTENSITY;
 
             // Celsius is only here so the config reads sensibly - the game has no temperature
             // units. Fresh Blood Thermal Intensity is calibrated for body heat (36C) against the
             // configured ambient, and any other start temperature scales linearly off that. Blood
             // set colder than ambient gives a negative offset, which reads as a cold spot.
-            float refSpan = 36f - CfgAmbientTempC.Value;
-            float span    = CfgStartTempC.Value - CfgAmbientTempC.Value;
+            float refSpan = 36f - AMBIENT_TEMP_C;
+            float span    = START_TEMP_C - AMBIENT_TEMP_C;
             _hotOffset = (Mathf.Abs(refSpan) < 0.01f)
-                       ? CfgFreshIntensity.Value
-                       : CfgFreshIntensity.Value * (span / refSpan);
+                       ? FRESH_INTENSITY
+                       : FRESH_INTENSITY * (span / refSpan);
 
             BuildStepTables();
 
@@ -243,7 +197,7 @@ namespace BloodSystem
             // for no benefit — the schedule inside a cohort can have as many steps as it likes
             // without needing more cohorts. Live cohorts are now Lifetime / window, so this is the
             // one knob that bounds memory as Lifetime grows.
-            _quantum = Mathf.Max(0.25f, CfgCohortWindow.Value);
+            _quantum = Mathf.Max(0.25f, COHORT_WINDOW);
 
             _cohorts.Clear();
             _live.Clear();
@@ -259,7 +213,7 @@ namespace BloodSystem
                 + (_keepWarm ? " KEEP-WARM" : "")
                 + (_forced ? " FORCED=" + _forcedValue.ToString("F1") : ""));
 
-            if (CfgDebugLog.Value)
+            if (DEBUG_LOG)
             {
                 for (int c = 0; c < _classes; c++)
                 {
@@ -297,8 +251,8 @@ namespace BloodSystem
                 // PIPScope.thermalAmbientIntensity is a public static the game itself never
                 // assigns — it sits at 1 forever and feeds _ThermalAmbientStrength = value - 1.
                 // Reassert every thermal render, since scene loads can reconstruct PIPScope state.
-                if (CfgAmbientOverride.Value >= 0f)
-                    PIPScope.thermalAmbientIntensity = CfgAmbientOverride.Value;
+                if (AMBIENT_OVERRIDE >= 0f)
+                    PIPScope.thermalAmbientIntensity = AMBIENT_OVERRIDE;
 
                 string scene = UnityEngine.SceneManagement.SceneManager.GetActiveScene().name;
                 // Keyed on the decal source too, not just the scene: that material gets swapped
@@ -367,7 +321,7 @@ namespace BloodSystem
         static int _dbgSteps, _dbgWrites;
         internal static void DebugNoteChunks(int chunkCount, int dotCount)
         {
-            if (!CfgDebugLog.Value) return;
+            if (!DEBUG_LOG) return;
             BloodSystemPlugin.Log.LogInfo("[BloodSystem] Thermal: splash built " + chunkCount
                 + " chunk(s) for " + dotCount + " dots (cooling=" + _live.Count + " cooled=" + _done.Count
                 + " materials=" + BloodSystemPlugin._matCache.Count + ")");
@@ -391,7 +345,7 @@ namespace BloodSystem
             _stepTime = new float[_classes][];
             _heatFrac = new float[_classes][];
 
-            float baseTau = Mathf.Max(0.25f, CfgCoolSeconds.Value);
+            float baseTau = Mathf.Max(0.25f, COOL_SECONDS);
 
             for (int c = 0; c < _classes; c++)
             {
@@ -404,12 +358,12 @@ namespace BloodSystem
                 // a small amount of it mixed in keeps the tail moving: slope at tau goes to about
                 // -0.027/s and the last gap drops to ~0.6s. It only alters the last few percent of
                 // the schedule, where the blood is nearly indistinguishable from the wall anyway.
-                float denseLin = Mathf.Clamp01(CfgDenseLinearity.Value);
-                float tailLin  = Mathf.Clamp01(CfgTailLinearity.Value);
+                float denseLin = Mathf.Clamp01(DENSE_LINEARITY);
+                float tailLin  = Mathf.Clamp01(TAIL_LINEARITY);
                 float linearity = Mathf.Lerp(tailLin, Mathf.Max(denseLin, tailLin), 1f - u);
                 // Thin blood finishes sooner, not merely faster at the start - so the multiplier
                 // shortens its whole schedule rather than only steepening its curve.
-                float tau = baseTau / Mathf.Lerp(1f, Mathf.Max(0.05f, CfgSparseCoolMult.Value), u);
+                float tau = baseTau / Mathf.Lerp(1f, Mathf.Max(0.05f, SPARSE_COOL_MULT), u);
                 // exp(-4) = 0.018, i.e. ~98% cooled at tau, which is close enough to call settled.
                 float k = 4f / tau;
 
@@ -420,9 +374,9 @@ namespace BloodSystem
                 // group has updated, the first is due again with exactly that same gap, so the
                 // splat is always mid-transition somewhere and never flips as a block.
                 float phase = 0f;
-                if (CfgStagger.Value && _classes > 1)
+                if (STAGGER && _classes > 1)
                 {
-                    int order = CfgStaggerOutward.Value ? (_classes - 1 - c) : c;
+                    int order = STAGGER_OUTWARD ? (_classes - 1 - c) : c;
                     phase = (tau / (_steps - 1)) * order / _classes;
                 }
 
@@ -593,7 +547,7 @@ namespace BloodSystem
             bool hasShape = !ReferenceEquals(shape, null);
 
             m.SetFloat(P_TRANSVIS,    1f);   // decals are transparent quads; thermal hides those by default
-            m.SetFloat(P_NOALPHA,     CfgOpaqueInThermal.Value ? 1f : 0f);
+            m.SetFloat(P_NOALPHA,     OPAQUE_IN_THERMAL ? 1f : 0f);
             m.SetFloat(P_DISABLE,     0f);
             m.SetFloat(P_COLORALPHA,  0f);
             m.SetFloat(P_VERTEXCOLOR, 0f);
@@ -601,7 +555,7 @@ namespace BloodSystem
             // In HeatMap mode the scale carries the actual temperature and is written per cooling
             // step by WriteHeat, so it is deliberately not set here.
             if (!_shapeViaHeatMap)
-                m.SetFloat(P_HEATMAPSCL, hasShape ? Mathf.Max(0f, CfgHeatMapStrength.Value) : 0f);
+                m.SetFloat(P_HEATMAPSCL, hasShape ? Mathf.Max(0f, HEATMAP_STRENGTH) : 0f);
         }
 
         // Heat is delivered through one of two channels.
@@ -617,7 +571,7 @@ namespace BloodSystem
             if (_shapeViaHeatMap)
             {
                 m.SetFloat(P_INTENSITY,  amb);
-                m.SetFloat(P_HEATMAPSCL, (v - amb) * Mathf.Max(0f, CfgHeatMapStrength.Value));
+                m.SetFloat(P_HEATMAPSCL, (v - amb) * Mathf.Max(0f, HEATMAP_STRENGTH));
             }
             else
             {
@@ -658,7 +612,7 @@ namespace BloodSystem
         {
             co.AmbSampled   = true;
             co.AmbIntensity = 0f;
-            if (!CfgUseVolumes.Value) return;
+            if (!USE_VOLUMES) return;
 
             var vols = TemperatureVolume.volumes;
             if (vols == null || vols.Count == 0) return;
@@ -747,7 +701,7 @@ namespace BloodSystem
                 if (stepped && _armed)
                 {
                     ApplyCohort(co);
-                    if (CfgDebugLog.Value)
+                    if (DEBUG_LOG)
                     {
                         _dbgSteps++;
                         BloodSystemPlugin.Log.LogInfo("[BloodSystem] Thermal step: cohort " + co.Id
@@ -821,7 +775,7 @@ namespace BloodSystem
             _mpb.Clear();
             r.GetPropertyBlock(_mpb);
             _mpb.SetFloat(P_TRANSVIS,     1f);
-            _mpb.SetFloat(P_NOALPHA,      CfgOpaqueInThermal.Value ? 1f : 0f);
+            _mpb.SetFloat(P_NOALPHA,      OPAQUE_IN_THERMAL ? 1f : 0f);
             _mpb.SetFloat(P_DISABLE,      0f);
             _mpb.SetFloat(P_COLORALPHA,   0f);
             _mpb.SetFloat(P_VERTEXCOLOR,  0f);
@@ -831,12 +785,12 @@ namespace BloodSystem
             if (_shapeViaHeatMap && hasShape)
             {
                 _mpb.SetFloat(P_INTENSITY,  amb);
-                _mpb.SetFloat(P_HEATMAPSCL, (v - amb) * Mathf.Max(0f, CfgHeatMapStrength.Value));
+                _mpb.SetFloat(P_HEATMAPSCL, (v - amb) * Mathf.Max(0f, HEATMAP_STRENGTH));
             }
             else
             {
                 _mpb.SetFloat(P_INTENSITY,  v);
-                _mpb.SetFloat(P_HEATMAPSCL, hasShape ? Mathf.Max(0f, CfgHeatMapStrength.Value) : 0f);
+                _mpb.SetFloat(P_HEATMAPSCL, hasShape ? Mathf.Max(0f, HEATMAP_STRENGTH) : 0f);
             }
             r.SetPropertyBlock(_mpb);
         }

@@ -913,8 +913,8 @@ namespace BloodSystem
         //   opaque with plenty around it, 90%     mean 0.90  frag 1.0  ->  0.81   most linear
         static float[] BuildDensityMap(Color[] pixels, int w, int h)
         {
-            int r = Mathf.Clamp(BloodThermal.CfgDensityBlur.Value, 1, 16);
-            float fw = Mathf.Clamp01(BloodThermal.CfgFragmentWeight.Value);
+            int r = Mathf.Clamp(BloodThermal.DensityBlur, 1, 16);
+            float fw = Mathf.Clamp01(BloodThermal.FragmentWeight);
 
             var a   = new float[w * h];
             var aSq = new float[w * h];
@@ -957,13 +957,9 @@ namespace BloodSystem
             int classes = BloodThermal.Classes;
             if (classes <= 1 || n == 0) return result;
 
-            // Normalized mode has already rescaled each image to 0-1, so the band edges are just
-            // that range; Absolute mode bands over the configured thresholds instead.
-            bool normalized = BloodThermal.NormalizeDensity;
-            float lo = normalized ? 0f : BloodThermal.CfgDensityMin.Value;
-            float hi = normalized ? 1f : BloodThermal.CfgDensityMax.Value;
-            if (hi - lo < 1e-4f) { lo = 0f; hi = 1f; }
-            float range = hi - lo;
+            // Each image has already been rescaled to 0-1 against its own range, so the band edges
+            // are simply that range split evenly.
+            const float lo = 0f, hi = 1f, range = hi - lo;
 
             var hist = new int[classes];
             for (int i = 0; i < n; i++)
@@ -977,9 +973,7 @@ namespace BloodSystem
             }
 
             var sb = new System.Text.StringBuilder();
-            sb.Append("[BloodSystem] Class bands (").Append(normalized ? "Normalized" : "Absolute")
-              .Append(") over density ").Append(lo.ToString("F2"))
-              .Append("-").Append(hi.ToString("F2")).Append(":");
+            sb.Append("[BloodSystem] Class bands over normalized density:");
             for (int c = 0; c < classes; c++)
             {
                 float bandHi = hi - range * c / classes;
