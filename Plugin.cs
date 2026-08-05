@@ -149,7 +149,8 @@ namespace BloodSystem
         static readonly Vector3 _tanLight = new Vector3(0.5f, 0.5f, 0.707f).normalized;
 
         // Same 10 brightness levels used by BuildDotMesh — keeps material cache bounded (10 entries per color).
-        static readonly float[] _brightLevels = { 0.700f, 0.733f, 0.767f, 0.800f, 0.833f, 0.867f, 0.900f, 0.933f, 0.967f, 1.000f };
+        internal static readonly float[] BRIGHT_LEVELS = { 0.700f, 0.733f, 0.767f, 0.800f, 0.833f, 0.867f, 0.900f, 0.933f, 0.967f, 1.000f };
+        static readonly float[] _brightLevels = BRIGHT_LEVELS;
         static Color BrightTint(Color col)
         {
             float b = _brightLevels[UnityEngine.Random.Range(0, _brightLevels.Length)];
@@ -2199,8 +2200,25 @@ namespace BloodSystem
             // With Curve Classes set to 1 (or thermal off) classes==1 and this is identical to
             // the old brightness-only chunking — no extra draw calls. Empty combinations are
             // skipped below, so the real chunk count stays well under the worst case.
-            float[] levels = { 0.700f, 0.733f, 0.767f, 0.800f, 0.833f, 0.867f, 0.900f, 0.933f, 0.967f, 1.000f };
-            int classes = BloodThermal.Enabled ? BloodThermal.Classes : 1;
+            // ActiveClasses, not Classes: 1 until a thermal camera has actually rendered, so a
+            // player without a thermal optic pays the same chunk count as before this system
+            // existed rather than eight times it.
+            int classes = BloodThermal.Enabled ? BloodThermal.ActiveClasses : 1;
+
+            // Chunks are the product of the two axes, and the product is what costs frames - one
+            // GameObject, mesh, renderer and material each. Ten brightness levels times eight
+            // classes is eighty chunks a shot, and with twenty shot groups retained that is 1600
+            // renderers. Cap the product instead of either axis: with one class the full ten
+            // levels are used exactly as before, and as classes rise the brightness levels thin
+            // out to hold the total near the budget. Brightness only spans 0.7-1.0, so dropping
+            // from ten shades to five is close to invisible, while the classes are the axis that
+            // actually does something on thermal.
+            const int CHUNK_BUDGET = 40;
+            int levelCount = Mathf.Clamp(CHUNK_BUDGET / Mathf.Max(1, classes), 3, BRIGHT_LEVELS.Length);
+            var levels = new float[levelCount];
+            for (int i = 0; i < levelCount; i++)
+                levels[i] = BRIGHT_LEVELS[Mathf.RoundToInt((float)i / (levelCount - 1) * (BRIGHT_LEVELS.Length - 1))];
+
             var buckets = new List<int>[levels.Length * classes];
             for (int i = 0; i < buckets.Length; i++) buckets[i] = new List<int>();
 

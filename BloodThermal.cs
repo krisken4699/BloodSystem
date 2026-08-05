@@ -114,7 +114,24 @@ namespace BloodSystem
         static bool  _enabled;
         static bool  _keepWarm;
 
+        // Number of density groups baked into the sampling table at startup. Fixed, because the
+        // table is built once and cannot be rebuilt when a thermal optic later appears.
         internal static int Classes { get { return _classes; } }
+
+        // Number of groups the splash mesh is actually SPLIT into right now.
+        //
+        // Splitting costs real money: BuildDotMesh emits one chunk - GameObject, mesh, renderer,
+        // material - per brightness level per class, so 8 classes is about 80 chunks a shot
+        // against 10, and with 20 shot groups retained that is 1600 renderers instead of 200.
+        // The split only buys anything when something can actually SEE the groups cool at
+        // different rates, so until a thermal camera has rendered even once it is pure waste and
+        // every dot goes in one group.
+        //
+        // Blood already on the wall when a thermal optic first comes out keeps whatever grouping
+        // it was built with; only later blood gets the full split. That is the right trade - the
+        // alternative is charging every player who never touches thermal, forever, on the chance
+        // that one day they might.
+        internal static int ActiveClasses { get { return _armed ? _classes : 1; } }
 
         // Each image's densities are rescaled against its own range before banding, so its
         // thickest areas always become the slowest-cooling group and its scattered edges the
