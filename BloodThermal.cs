@@ -68,6 +68,8 @@ namespace BloodSystem
         internal static ConfigEntry<float>  CfgSparseCoolMult;
         internal static ConfigEntry<float>  CfgFreshIntensity;
         internal static ConfigEntry<bool>   CfgUseVolumes;
+        internal static ConfigEntry<float>  CfgDensityMin;
+        internal static ConfigEntry<float>  CfgDensityMax;
         internal static ConfigEntry<int>    CfgDensityBlur;
         internal static ConfigEntry<bool>   CfgOpaqueInThermal;
         internal static ConfigEntry<float>  CfgHeatMapStrength;
@@ -102,6 +104,10 @@ namespace BloodSystem
                 "How bright fresh blood reads above its surroundings on thermal, in the game's own units. 27 matches a Sosig body (ObjectTemperature profile SosigBody). Raise to make fresh blood glow harder.");
             CfgUseVolumes = cfg.Bind("Thermal", "Use Temperature Volumes", true,
                 "Sample any TemperatureVolume the map author placed to decide local ambient temperature, instead of always using Ambient Temperature C. Sampled once per group of blood when it spawns, never per frame. Most H3VR maps have no volumes at all, in which case this costs nothing.");
+            CfgDensityMin = cfg.Bind("Thermal", "Density Class Min", 0.05f,
+                "Blood at or below this thickness is treated as the thinnest class - scattered droplets, cools fastest. Thickness is measured as how much of a dot's surroundings in the source image is blood, so 0.05 means about 5% covered. Fixed rather than measured per image on purpose: the same thickness then means the same thing in every splatter PNG, and an image made entirely of fine mist correctly uses only the thin classes instead of being stretched to look like it has a dense core. Check the log for the real distribution of your images.");
+            CfgDensityMax = cfg.Bind("Thermal", "Density Class Max", 0.6f,
+                "Blood at or above this thickness is treated as the densest class - pooled blood, cools slowest and most linearly. The range between this and Density Class Min is split evenly among the classes in between.");
             CfgDensityBlur = cfg.Bind("Thermal", "Density Blur Radius", 4,
                 "Pixel radius used when measuring how densely packed with blood each part of the source splatter PNGs is. Larger = coarser dense/thin split. Only read once at startup while building the splatter sampling table. 1-16.");
             CfgOpaqueInThermal = cfg.Bind("Thermal", "Render Blood Opaque In Thermal", false,

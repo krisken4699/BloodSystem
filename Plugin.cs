@@ -754,25 +754,18 @@ namespace BloodSystem
 
                 if (imgTotal < 0.001f || imgUVs.Count == 0) continue;
 
-                // Normalize this image's densities against its OWN thinnest and thickest points,
-                // so a sample's class describes how dense that part of this splat is rather than
-                // an absolute value. Measured absolutely, a uniformly heavy splatter PNG and a
-                // wispy one share one scale and one of them collapses into a single class - and
-                // the thresholds move depending on which PNGs happen to be installed.
+                // Densities are deliberately NOT rescaled per image. The value is box-blurred alpha
+                // coverage - literally "what fraction of this pixel's neighbourhood is blood" - so
+                // it already means something absolute on its own, and the same number means the
+                // same thickness in every image. Two earlier attempts normalized each image
+                // against its own range (first raw min/max, then 2nd/98th percentile) to guarantee
+                // every class got samples; that was the wrong goal. It stretched a wispy PNG until
+                // its thickest mist was labelled a dense core, inventing structure the artwork does
+                // not have. A thin image SHOULD land entirely in the thin classes.
                 //
-                // The ends of the range are taken at percentiles rather than the outright min and
-                // max, because those are single pixels and a single pixel can be an outlier. One
-                // unusually thick spot would stretch the top of the range on its own and squash
-                // every other sample into the low bands, leaving the densest class nearly empty.
-                // Clamping to the 2nd/98th percentile makes the range describe the bulk of the
-                // image; the handful of samples outside it just saturate at 0 or 1.
-                var dSorted = imgDens.ToArray();
-                System.Array.Sort(dSorted);
-                float dLo = dSorted[Mathf.Clamp((int)(dSorted.Length * 0.02f), 0, dSorted.Length - 1)];
-                float dHi = dSorted[Mathf.Clamp((int)(dSorted.Length * 0.98f), 0, dSorted.Length - 1)];
-                float dRange = dHi - dLo;
-                for (int i = 0; i < imgDens.Count; i++)
-                    imgDens[i] = dRange > 1e-5f ? Mathf.Clamp01((imgDens[i] - dLo) / dRange) : 0.5f;
+                // Class boundaries now come from fixed config thresholds instead. See
+                // BuildCurveClasses; LogDensityStats prints the real distribution to set them from.
+                LogDensityStats(tex.name, imgDens);
 
                 float norm = 1f / imgTotal;
                 for (int i = 0; i < imgUVs.Count; i++)
@@ -794,6 +787,29 @@ namespace BloodSystem
             _cumWeights      = wList.ToArray();
             _splatterClasses = BuildCurveClasses(densList);
             LogClassDistribution(densList);
+        }
+
+        // Raw, absolute density distribution for one source image — the numbers to choose
+        // Density Class Min / Max from. Density is box-blurred alpha coverage, so 0.8 means the
+        // neighbourhood is ~80% blood and 0.1 means scattered droplets.
+        static void LogDensityStats(string name, List<float> dens)
+        {
+            try
+            {
+                if (dens.Count == 0) return;
+                var s = dens.ToArray();
+                System.Array.Sort(s);
+                int n = s.Length;
+                Log.LogInfo("[BloodSystem] Density '" + name + "' n=" + n
+                    + " min=" + s[0].ToString("F3")
+                    + " p05=" + s[n * 5 / 100].ToString("F3")
+                    + " p25=" + s[n * 25 / 100].ToString("F3")
+                    + " p50=" + s[n / 2].ToString("F3")
+                    + " p75=" + s[n * 75 / 100].ToString("F3")
+                    + " p95=" + s[n * 95 / 100].ToString("F3")
+                    + " max=" + s[n - 1].ToString("F3"));
+            }
+            catch (Exception ex) { Log.LogWarning("[BloodSystem] LogDensityStats: " + ex.Message); }
         }
 
         // Checks the density classes actually mean what they are meant to mean.
@@ -875,16 +891,15 @@ namespace BloodSystem
             return dst;
         }
 
-        // Buckets samples into equal-width bands of NORMALIZED density (0 = this image's thinnest
-        // point, 1 = its thickest — see the per-image rescale in BuildSampleDataFromAll).
+        // Buckets samples into equal-width bands between two FIXED density thresholds, so a given
+        // thickness always lands in the same class no matter which image it came from or what else
+        // is installed. Density is absolute box-blurred alpha coverage; see LogDensityStats.
         // Class 0 = densest, cools slowest and most linearly; last class = thinnest, pure Newton.
         //
-        // Replaced an equal-POPULATION split, which forced exactly 1/N of the rays into each class
-        // whatever the image looked like. That guaranteed every class was used, but it lied about
-        // the picture: a splat that is mostly thin mist with a small heavy core had that core
-        // inflated to a fifth of the rays, and the class boundaries drifted with whichever PNGs
-        // were installed. Equal-width bands over a normalized range give each class a fixed,
-        // predictable meaning, and the per-image normalization is what keeps them all populated.
+        // Anything at or above Density Class Max is class 0, anything at or below Min is the
+        // thinnest class. A PNG that is entirely thin mist therefore uses only the thin classes,
+        // which is the point - the earlier per-image rescale would have spread it across all of
+        // them and pretended it had a dense core.
         static byte[] BuildCurveClasses(List<float> densities)
         {
             int n = densities.Count;
@@ -892,13 +907,35 @@ namespace BloodSystem
             int classes = BloodThermal.Classes;
             if (classes <= 1 || n == 0) return result;
 
+            float lo = BloodThermal.CfgDensityMin.Value;
+            float hi = BloodThermal.CfgDensityMax.Value;
+            if (hi - lo < 1e-4f) { lo = 0f; hi = 1f; }
+            float range = hi - lo;
+
+            var hist = new int[classes];
             for (int i = 0; i < n; i++)
             {
-                // Densest is class 0, so invert before banding.
-                float inv = 1f - Mathf.Clamp01(densities[i]);
-                int cls = Mathf.Clamp((int)(inv * classes), 0, classes - 1);
+                float t = Mathf.Clamp01((densities[i] - lo) / range);
+                // Densest is class 0, so invert before banding. The 0.9999 keeps t==1 inside the
+                // top band instead of rounding past the last index.
+                int cls = Mathf.Clamp((int)((1f - t) * classes * 0.9999f), 0, classes - 1);
                 result[i] = (byte)cls;
+                hist[cls]++;
             }
+
+            var sb = new System.Text.StringBuilder();
+            sb.Append("[BloodSystem] Class bands over density ").Append(lo.ToString("F2"))
+              .Append("-").Append(hi.ToString("F2")).Append(":");
+            for (int c = 0; c < classes; c++)
+            {
+                float bandHi = hi - range * c / classes;
+                float bandLo = hi - range * (c + 1) / classes;
+                sb.Append("\n  class ").Append(c).Append(" density ")
+                  .Append(bandLo.ToString("F2")).Append("-").Append(bandHi.ToString("F2"))
+                  .Append(" -> ").Append(hist[c]).Append(" samples (")
+                  .Append((100f * hist[c] / n).ToString("F1")).Append("%)");
+            }
+            Log.LogInfo(sb.ToString());
             return result;
         }
 
