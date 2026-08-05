@@ -102,14 +102,17 @@ namespace BloodSystem
                 "How heat is pushed to decals. Material: one write updates every decal sharing that material (fastest, default). PropertyBlock: writes each decal renderer individually via MaterialPropertyBlock, the same route the game's own ObjectTemperature uses. Only switch to PropertyBlock if blood does not show up on thermal at all in Material mode.");
             CfgDebugForce = cfg.Bind("Thermal", "Debug Force Intensity", -1f,
                 "Diagnostic. -1 = off (normal cooling). 0 or higher = pin every blood decal at that thermal intensity forever, ignoring all cooling. Set to 27 to check whether blood shows up on thermal at all without waiting for or fighting the cooling curve.");
+            CfgShapeMode = cfg.Bind("Thermal", "Shape Mode", "HeatMap",
+                "How a decal's heat is delivered, which decides whether its square quad is visible on thermal. HeatMap: the decal sits at ambient heat and ALL of its warmth is painted through its shape texture, so the transparent corners read exactly like the wall behind them and only the round blob is hot. Intensity: the whole quad is heated and the texture only modulates it, which leaves a visible square around every splat. Use HeatMap.");
             CfgAmbientOverride = cfg.Bind("Thermal", "Thermal Ambient Intensity Override", -1f,
                 "Fixes thermal showing a flat white image in custom maps. The thermal shader adds the scene's ambient light into the heat value, so a map whose Ambient Color is not black washes everything out to white. Vanilla maps ship black ambient, which is why they look right. -1 = leave the game alone. 0 = cancel the ambient contribution entirely (try this first). 1 = the game's own untouched value. This is global, not per-map. Proper fix is to set Ambient Color to black in the map's own lighting settings.");
             CfgDebugLog = cfg.Bind("Thermal", "Debug Logging", false,
                 "Log the baked cooling schedule at startup, then every cooling step and every splash chunk count as they happen. For checking the system is actually working and how much it costs. Noisy - leave off for normal play.");
         }
 
-        internal static ConfigEntry<bool>  CfgDebugLog;
-        internal static ConfigEntry<float> CfgAmbientOverride;
+        internal static ConfigEntry<bool>   CfgDebugLog;
+        internal static ConfigEntry<float>  CfgAmbientOverride;
+        internal static ConfigEntry<string> CfgShapeMode;
 
         // ── Baked step tables ─────────────────────────────────────────────────────
         // _stepTime[class][i] = seconds after spawn at which step i is applied
@@ -121,6 +124,7 @@ namespace BloodSystem
         static float _quantum = 2.5f;
         static float _hotOffset;          // intensity of fresh blood above ambient
         static bool  _usePropertyBlock;
+        static bool  _shapeViaHeatMap;
         static bool  _forced;             // Debug Force Intensity is active
         static float _forcedValue;
         static bool  _enabled;
@@ -172,6 +176,8 @@ namespace BloodSystem
             _keepWarm = CfgKeepWarm.Value;
             _usePropertyBlock = string.Equals(CfgApplyMode.Value, "PropertyBlock",
                                               System.StringComparison.OrdinalIgnoreCase);
+            _shapeViaHeatMap  = !string.Equals(CfgShapeMode.Value, "Intensity",
+                                               System.StringComparison.OrdinalIgnoreCase);
             _forcedValue = CfgDebugForce.Value;
             _forced      = _forcedValue >= 0f;
 
@@ -426,8 +432,8 @@ namespace BloodSystem
             if (!_cohorts.TryGetValue(key.Cohort, out co)) return;
             co.Mats.Add(new MatRef(m, key, drip));
 
-            if (_forced)                 m.SetFloat(P_INTENSITY, _forcedValue);
-            else if (_armed || _keepWarm) m.SetFloat(P_INTENSITY, IntensityAt(co, co.Step));
+            if (_forced)                  WriteHeat(m, _forcedValue, co.AmbIntensity);
+            else if (_armed || _keepWarm) WriteHeat(m, IntensityAt(co, co.Step), co.AmbIntensity);
         }
 
         // Airborne blood — spray particles, in-flight dots, falling drops. It is only alive for a
@@ -437,7 +443,8 @@ namespace BloodSystem
         {
             if (!_enabled || ReferenceEquals(m, null)) return;
             ApplyShapeProps(m);
-            m.SetFloat(P_INTENSITY, _forced ? _forcedValue : _hotOffset);
+            // Airborne blood has no cohort, so ambient is the global baseline of 0.
+            WriteHeat(m, _forced ? _forcedValue : _hotOffset, 0f);
         }
 
         // The constant, non-temperature half of the thermal property set — the part that decides
@@ -485,7 +492,31 @@ namespace BloodSystem
             m.SetFloat(P_COLORALPHA,  0f);
             m.SetFloat(P_VERTEXCOLOR, 0f);
             m.SetTexture(P_HEATMAP,   hasShape ? shape : Texture2D.whiteTexture);
-            m.SetFloat(P_HEATMAPSCL,  hasShape ? Mathf.Max(0f, CfgHeatMapStrength.Value) : 0f);
+            // In HeatMap mode the scale carries the actual temperature and is written per cooling
+            // step by WriteHeat, so it is deliberately not set here.
+            if (!_shapeViaHeatMap)
+                m.SetFloat(P_HEATMAPSCL, hasShape ? Mathf.Max(0f, CfgHeatMapStrength.Value) : 0f);
+        }
+
+        // Heat is delivered through one of two channels.
+        //
+        // Intensity mode heats the entire quad and lets the shape texture modulate it, which
+        // leaves the decal's transparent corners hotter than the wall — a visible square.
+        //
+        // HeatMap mode pins the quad itself at ambient and paints all the warmth through the
+        // shape texture instead, so the corners read exactly like the surface behind them and
+        // only the round blob is hot. That is the mode that makes a splat look like a splat.
+        static void WriteHeat(Material m, float v, float amb)
+        {
+            if (_shapeViaHeatMap)
+            {
+                m.SetFloat(P_INTENSITY,  amb);
+                m.SetFloat(P_HEATMAPSCL, (v - amb) * Mathf.Max(0f, CfgHeatMapStrength.Value));
+            }
+            else
+            {
+                m.SetFloat(P_INTENSITY, v);
+            }
         }
 
         // Only does anything in the PropertyBlock fallback mode. Called from every decal spawn
@@ -636,7 +667,7 @@ namespace BloodSystem
                 {
                     Renderer r = co.Renderers[i];
                     if (r == null) { co.Renderers.RemoveAt(i); continue; }
-                    ApplyToRenderer(r, v);
+                    ApplyToRenderer(r, v, co.AmbIntensity);
                     _dbgWrites++;
                 }
             }
@@ -645,12 +676,12 @@ namespace BloodSystem
                 for (int i = 0; i < co.Mats.Count; i++)
                 {
                     Material m = co.Mats[i].Mat;
-                    if (!ReferenceEquals(m, null)) { m.SetFloat(P_INTENSITY, v); _dbgWrites++; }
+                    if (!ReferenceEquals(m, null)) { WriteHeat(m, v, co.AmbIntensity); _dbgWrites++; }
                 }
             }
         }
 
-        static void ApplyToRenderer(Renderer r, float v)
+        static void ApplyToRenderer(Renderer r, float v, float amb)
         {
             // Same shape reasoning as ApplyShapeProps — the decal's own texture is what makes the
             // heat round instead of a square quad.
@@ -661,14 +692,24 @@ namespace BloodSystem
             if (_mpb == null) _mpb = new MaterialPropertyBlock();
             _mpb.Clear();
             r.GetPropertyBlock(_mpb);
-            _mpb.SetFloat(P_INTENSITY,    v);
             _mpb.SetFloat(P_TRANSVIS,     1f);
             _mpb.SetFloat(P_NOALPHA,      CfgOpaqueInThermal.Value ? 1f : 0f);
             _mpb.SetFloat(P_DISABLE,      0f);
             _mpb.SetFloat(P_COLORALPHA,   0f);
             _mpb.SetFloat(P_VERTEXCOLOR,  0f);
             _mpb.SetTexture(P_HEATMAP,    hasShape ? shape : Texture2D.whiteTexture);
-            _mpb.SetFloat(P_HEATMAPSCL,   hasShape ? Mathf.Max(0f, CfgHeatMapStrength.Value) : 0f);
+
+            // Same two channels as WriteHeat, on the property-block route.
+            if (_shapeViaHeatMap && hasShape)
+            {
+                _mpb.SetFloat(P_INTENSITY,  amb);
+                _mpb.SetFloat(P_HEATMAPSCL, (v - amb) * Mathf.Max(0f, CfgHeatMapStrength.Value));
+            }
+            else
+            {
+                _mpb.SetFloat(P_INTENSITY,  v);
+                _mpb.SetFloat(P_HEATMAPSCL, hasShape ? Mathf.Max(0f, CfgHeatMapStrength.Value) : 0f);
+            }
             r.SetPropertyBlock(_mpb);
         }
 
