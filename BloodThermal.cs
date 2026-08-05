@@ -88,8 +88,6 @@ namespace BloodSystem
         const int    DENSITY_BLUR     = 4;     // floor on the thickness-measuring radius, in pixels
         const float  DENSITY_BLUR_FRACTION = 0.03f; // radius as a share of the image's short side;
                                                // must exceed droplet size or a lone droplet reads solid
-        const float  DENSE_ANCHOR     = 0.5f;  // coverage that counts as genuinely thick; stops a
-                                               // thin image from normalizing its wisps into a core
         const bool   OPAQUE_IN_THERMAL = false; // true re-squares the decals
         const float  HEATMAP_STRENGTH = 1f;
         const bool   SHAPE_VIA_HEATMAP = true;  // paint heat through the shape texture
@@ -129,7 +127,6 @@ namespace BloodSystem
         internal const float FragmentWeight = FRAGMENT_WEIGHT;
         internal const int   DensityBlur    = DENSITY_BLUR;
         internal const float DensityBlurFraction = DENSITY_BLUR_FRACTION;
-        internal const float DenseAnchor    = DENSE_ANCHOR;
         internal static bool Enabled { get { return _enabled; } }
 
         // ── Cohorts ───────────────────────────────────────────────────────────────

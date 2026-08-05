@@ -774,15 +774,17 @@ namespace BloodSystem
                     float dLo = dSorted[Mathf.Clamp((int)(dSorted.Length * 0.02f), 0, dSorted.Length - 1)];
                     float dHi = dSorted[Mathf.Clamp((int)(dSorted.Length * 0.98f), 0, dSorted.Length - 1)];
 
-                    // Anchor the top of the range so normalization cannot INVENT a dense core.
-                    // Rescaling purely against the image's own maximum guarantees something lands
-                    // in the slowest-cooling group no matter what the image actually contains - so
-                    // a splatter made entirely of thin spray had its heaviest wisps promoted to
-                    // "thick pool" and held heat like one. Holding the top at a real coverage
-                    // figure means a thin image simply never reaches the top classes, while an
-                    // image that genuinely does have thick areas still normalizes against itself.
-                    dHi = Mathf.Max(dHi, BloodThermal.DenseAnchor);
-
+                    // Purely relative, with no absolute floor under the top of the range. Clamping
+                    // it to a fixed coverage figure would be measuring against the original image
+                    // again, which is exactly what normalizing is meant to avoid - the two rules
+                    // would contradict each other and the fixed one would quietly win for any
+                    // image thinner than the threshold.
+                    //
+                    // Thin blood reaching the slowest-cooling group was a measurement fault, not a
+                    // scaling one: the blur window used to be narrower than a droplet, so a lone
+                    // droplet measured as solid. With the window sized properly a spray image
+                    // measures thin throughout, and spreading it across the classes is correct -
+                    // its heaviest parts really are the parts that hold heat longest.
                     float dRange = dHi - dLo;
                     for (int i = 0; i < imgDens.Count; i++)
                         imgDens[i] = dRange > 1e-5f ? Mathf.Clamp01((imgDens[i] - dLo) / dRange) : 0f;
