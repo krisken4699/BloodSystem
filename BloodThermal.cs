@@ -85,8 +85,8 @@ namespace BloodSystem
                 "Temperature blood cools toward. H3VR has NO ambient temperature of any kind - no per-map, per-area or per-surface temperature exists in the game - so this has to be set here. Once blood reaches it, it is indistinguishable from the wall it is on.");
             CfgCoolSeconds = cfg.Bind("Thermal", "Cooling Seconds", 8f,
                 "How long blood takes to finish cooling and settle at the surrounding temperature. This is the WHOLE cooldown, not a half life - at this many seconds the blood is done and reads the same as the wall it is on. Replaces the old 'Cooling Half Life Seconds', which was the time to lose only half the heat and therefore took about 6x this long to actually finish.");
-            CfgSteps = cfg.Bind("Thermal", "Temperature Steps", 18,
-                "How many discrete temperature shades blood passes through on its way to ambient. Nothing is computed per frame - these are solved once at startup and stepped through, so raising this costs almost nothing and makes the cooldown read as a smooth fade instead of visible jumps. 2-18.");
+            CfgSteps = cfg.Bind("Thermal", "Temperature Steps", 40,
+                "How many discrete temperature shades blood passes through on its way to ambient. The shades are evenly spaced in temperature, so this is directly how fine the fade looks - 40 means each step is about 1/40th of the total brightness drop. The whole schedule is solved once at startup and then only replayed, so a step costs one number written per material and nothing is ever computed per frame. 2-64.");
             CfgCohortWindow = cfg.Bind("Thermal", "Cohort Window Seconds", 0.5f,
                 "Blood spawned within this many seconds of other blood shares one cooling schedule, and therefore picks up that schedule's progress instead of starting fresh. Keep it well under Cooling Seconds: if it is comparable, a second shot lands in a cohort that has already half cooled and its new blood appears part-cooled or snaps straight to cold. Raising it groups more blood together and holds fewer materials at once; lowering it makes every burst cool on its own timeline. Blood fired in the same burst shares a cohort either way, so this costs nothing during sustained fire.");
             CfgClasses = cfg.Bind("Thermal", "Curve Classes", 5,
@@ -190,7 +190,7 @@ namespace BloodSystem
             _forced      = _forcedValue >= 0f;
 
             _classes = Mathf.Clamp(CfgClasses.Value, 1, MAX_CLASSES);
-            _steps   = Mathf.Clamp(CfgSteps.Value,   2, 18);
+            _steps   = Mathf.Clamp(CfgSteps.Value,   2, 64);
             _hotOffset = CfgFreshIntensity.Value;
 
             // Celsius is only here so the config reads sensibly - the game has no temperature
@@ -374,36 +374,55 @@ namespace BloodSystem
                 _stepTime[c] = new float[_steps];
                 _heatFrac[c] = new float[_steps];
 
-                // Steps are spaced evenly in TIME, and the temperature at each is read off the
-                // curve. The reverse - evenly spaced temperatures, solving for when each is
-                // reached - is what this used to do, and it behaves badly: on an exponential the
-                // times come out logarithmic, so the first half of the steps land in the first
-                // ~15% of the schedule where the blood is still near max heat and every shade
-                // looks identical, while the visible second half is left stretched over many
-                // seconds apiece. That reads as "nothing happens for ages, then huge jumps".
+                // Steps are spaced evenly in TEMPERATURE, solving for when each shade is reached.
+                // What you actually see is the contrast between the blood and the surface behind
+                // it, and that is proportional to heat above ambient - so equal heat intervals are
+                // equal visual intervals, and the fade reads as one steady cadence.
                 //
-                // Even time spacing inverts that: the big temperature drops happen early, while
-                // the blood is too hot to distinguish anyway, and the late steps are small and
-                // regular so it settles smoothly. Newton's law still sets every value; only the
-                // sampling changed.
+                // Spacing evenly in time instead makes the early drops several times larger than
+                // the late ones (5.6 heat units down to 0.2 at 18 steps), which is what still felt
+                // chunky. This was also the original spacing and was abandoned for the opposite
+                // problem - the times come out logarithmic, and back when the schedule ran 46s the
+                // final gaps were over ten seconds each. At an 8s schedule the worst gap is well
+                // under a second, so the reason for avoiding it is gone.
                 for (int i = 0; i < _steps; i++)
                 {
-                    float t = tau * i / (_steps - 1);
-                    _stepTime[c][i] = t;
-                    _heatFrac[c][i] = (i == _steps - 1) ? 0f : CoolCurve(t, k, tau, linearity);
+                    float frac = 1f - (float)i / (_steps - 1);
+                    _heatFrac[c][i] = frac;
+                    _stepTime[c][i] = (i == 0) ? 0f : SolveTime(frac, k, tau, linearity);
                 }
             }
         }
 
+        // Newton's exponential never actually reaches ambient, so the schedule used to clamp the
+        // final step to zero. That clamp was the "grey then suddenly black" jump: at tau the raw
+        // curve still sits at exp(-4) = 0.018, which is ~0.6 heat units, while the steps just
+        // before it are only 0.2-0.3 apart - so the last step was about three times every other.
+        //
+        // Rebasing the curve so it passes through zero at tau removes the discontinuity entirely
+        // instead of hiding it: the shape is untouched, the tail just lands where it claims to.
         static float CoolCurve(float t, float k, float tau, float linearity)
         {
-            float expPart = Mathf.Exp(-k * t);
-            float linPart = Mathf.Max(0f, 1f - t / tau);
-            return Mathf.Lerp(expPart, linPart, linearity);
+            if (t >= tau) return 0f;
+            float raw  = Mathf.Lerp(Mathf.Exp(-k * t), Mathf.Max(0f, 1f - t / tau), linearity);
+            float floorAtTau = Mathf.Lerp(Mathf.Exp(-k * tau), 0f, linearity);
+            return Mathf.Clamp01((raw - floorAtTau) / Mathf.Max(1e-4f, 1f - floorAtTau));
         }
 
-        // (The old SolveTime bisection is gone with the equal-temperature spacing it existed to
-        // support - times now come straight from the schedule, so nothing has to be solved for.)
+        // When is this shade reached? Bisection - the curve is monotonically decreasing, so it
+        // always converges. Runs Steps * Classes times at startup and never again, which is the
+        // whole point: the cost of a smoother fade is paid once during load, not per frame.
+        static float SolveTime(float targetFrac, float k, float tau, float linearity)
+        {
+            if (targetFrac <= 0f) return tau;
+            float lo = 0f, hi = tau;
+            for (int it = 0; it < 40; it++)
+            {
+                float mid = (lo + hi) * 0.5f;
+                if (CoolCurve(mid, k, tau, linearity) > targetFrac) lo = mid; else hi = mid;
+            }
+            return (lo + hi) * 0.5f;
+        }
 
         // ── Cohort lookup ─────────────────────────────────────────────────────────
 

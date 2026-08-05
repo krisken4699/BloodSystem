@@ -754,6 +754,22 @@ namespace BloodSystem
 
                 if (imgTotal < 0.001f || imgUVs.Count == 0) continue;
 
+                // Normalize this image's densities against its OWN thinnest and thickest points,
+                // so a sample's class describes how dense that part of this splat is rather than
+                // an absolute value. Measured absolutely, a uniformly heavy splatter PNG and a
+                // wispy one share one scale and one of them collapses into a single class - and
+                // the thresholds move depending on which PNGs happen to be installed.
+                float dMin = float.MaxValue, dMax = float.MinValue;
+                for (int i = 0; i < imgDens.Count; i++)
+                {
+                    float d = imgDens[i];
+                    if (d < dMin) dMin = d;
+                    if (d > dMax) dMax = d;
+                }
+                float dRange = dMax - dMin;
+                for (int i = 0; i < imgDens.Count; i++)
+                    imgDens[i] = dRange > 1e-5f ? (imgDens[i] - dMin) / dRange : 0.5f;
+
                 float norm = 1f / imgTotal;
                 for (int i = 0; i < imgUVs.Count; i++)
                 {
@@ -811,10 +827,16 @@ namespace BloodSystem
             return dst;
         }
 
-        // Splits the sampled pixels into equal-population density classes. Equal population rather
-        // than fixed density thresholds so every class stays populated no matter what PNGs are
-        // loaded — a uniformly dense splatter image would otherwise put every ray in one class.
-        // Class 0 = densest (cools slowest, most linearly), last class = thinnest.
+        // Buckets samples into equal-width bands of NORMALIZED density (0 = this image's thinnest
+        // point, 1 = its thickest — see the per-image rescale in BuildSampleDataFromAll).
+        // Class 0 = densest, cools slowest and most linearly; last class = thinnest, pure Newton.
+        //
+        // Replaced an equal-POPULATION split, which forced exactly 1/N of the rays into each class
+        // whatever the image looked like. That guaranteed every class was used, but it lied about
+        // the picture: a splat that is mostly thin mist with a small heavy core had that core
+        // inflated to a fifth of the rays, and the class boundaries drifted with whichever PNGs
+        // were installed. Equal-width bands over a normalized range give each class a fixed,
+        // predictable meaning, and the per-image normalization is what keeps them all populated.
         static byte[] BuildCurveClasses(List<float> densities)
         {
             int n = densities.Count;
@@ -822,27 +844,12 @@ namespace BloodSystem
             int classes = BloodThermal.Classes;
             if (classes <= 1 || n == 0) return result;
 
-            var sorted = densities.ToArray();
-            System.Array.Sort(sorted);
-
-            // cut[c] = density below which a sample falls into class c+1 or later
-            var cut = new float[classes - 1];
-            for (int c = 0; c < classes - 1; c++)
-            {
-                // Densest class takes the TOP slice, so cuts are read from the high end down.
-                int idx = Mathf.Clamp(Mathf.RoundToInt(n * (float)(classes - 1 - c) / classes), 0, n - 1);
-                cut[c] = sorted[idx];
-            }
-
             for (int i = 0; i < n; i++)
             {
-                float d = densities[i];
-                byte cls = (byte)(classes - 1);
-                for (int c = 0; c < classes - 1; c++)
-                {
-                    if (d >= cut[c]) { cls = (byte)c; break; }
-                }
-                result[i] = cls;
+                // Densest is class 0, so invert before banding.
+                float inv = 1f - Mathf.Clamp01(densities[i]);
+                int cls = Mathf.Clamp((int)(inv * classes), 0, classes - 1);
+                result[i] = (byte)cls;
             }
             return result;
         }
