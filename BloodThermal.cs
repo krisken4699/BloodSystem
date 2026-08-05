@@ -529,8 +529,8 @@ namespace BloodSystem
             Cohort co;
             if (!_cohorts.TryGetValue(cohortId, out co)) return;
             co.Renderers.Add(r);
-            if (_forced)                  ApplyToRenderer(r, _forcedValue);
-            else if (_armed || _keepWarm) ApplyToRenderer(r, IntensityAt(co, co.Step));
+            if (_forced)                  ApplyToRenderer(r, _forcedValue, co.AmbIntensity);
+            else if (_armed || _keepWarm) ApplyToRenderer(r, IntensityAt(co, co.Step), co.AmbIntensity);
         }
 
         // Cohort ambient is sampled from the first blood placed in it. Cohorts are per-shot-ish,
