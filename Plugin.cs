@@ -191,7 +191,7 @@ namespace BloodSystem
             _instance = this;
 
             CfgEnabled   = Config.Bind("Blood", "Enabled",          true,   "Toggle all blood effects.");
-            CfgLifetime  = Config.Bind("Blood", "Lifetime seconds",  120f,   "How long splash and drip stains last before despawning. Long enough that blood is still around to look at on thermal well after it has finished cooling.");
+            CfgLifetime  = Config.Bind("Blood", "Lifetime seconds",  60f,   "How long splash and drip stains last before despawning. Long enough that blood is still around to look at on thermal well after it has finished cooling.");
             CfgRayCount  = Config.Bind("Blood", "Max rays per shot",  3000,   "Maximum splash ray count. Capped to the actual number of image pixels if fewer.");
             CfgConeAngle = Config.Bind("Blood", "Cone half-angle",   10f,    "Half-angle in degrees of the splash cone.");
             CfgDotSize   = Config.Bind("Blood", "Dot base radius",   0.008f, "Base radius of each splash dot in metres. Scales to Dot Max Scale at Dot Scale Range distance.");

@@ -79,7 +79,7 @@ namespace BloodSystem
                 "Temperature blood leaves the body at, in Celsius. Purely a readability knob - H3VR has no real temperature units, this is converted to the game's arbitrary thermal scale.");
             CfgAmbientTempC = cfg.Bind("Thermal", "Ambient Temperature C", 20f,
                 "Temperature blood cools toward. H3VR has NO ambient temperature of any kind - no per-map, per-area or per-surface temperature exists in the game - so this has to be set here. Once blood reaches it, it is indistinguishable from the wall it is on.");
-            CfgHalfLife = cfg.Bind("Thermal", "Cooling Half Life Seconds", 20f,
+            CfgHalfLife = cfg.Bind("Thermal", "Cooling Half Life Seconds", 8f,
                 "Seconds for blood to lose half its heat above ambient (Newton's law of cooling). Lower = cools faster. Sized so cooling plays out over a good part of the decal's lifetime instead of finishing in the first few seconds.");
             CfgSteps = cfg.Bind("Thermal", "Temperature Steps", 24,
                 "How many discrete temperature shades blood passes through on its way to ambient. Nothing is computed per frame - these are solved once at startup and stepped through, so raising this costs almost nothing and makes the cooldown read as a smooth fade instead of visible jumps. 2-64.");
