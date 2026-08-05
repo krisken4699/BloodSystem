@@ -244,6 +244,9 @@ namespace BloodSystem
             // Soft-circle for splash dots, hard-circle for drip stains
             _decalTex      = MakeSoftCircle(96);
             _hardCircleTex = MakeHardCircle(64);
+            // RGB-encoded copies so thermal can read the shape (see MakeHeatMask).
+            BloodThermal.RegisterHeatMask(_decalTex,      MakeHeatMask(_decalTex));
+            BloodThermal.RegisterHeatMask(_hardCircleTex, MakeHeatMask(_hardCircleTex));
 
             // Load Alloy/Core material from AssetBundle shipped with the mod.
             // If bundle missing (dev env), falls back to scene scan on first sosig spawn.
@@ -573,6 +576,28 @@ namespace BloodSystem
 
         // Procedural gaussian soft-circle 64×64: white center, alpha falls to 0 at edge.
         // Used for dot quads, drip stain quads, and pellet spray particles.
+        // Thermal reads _ThermalHeatMap as RGB, but MakeSoftCircle/MakeHardCircle put the circle
+        // shape entirely in ALPHA and leave RGB pure white. Handing those straight to the thermal
+        // shader gives uniform heat over the whole quad — a square. This bakes alpha into RGB so
+        // the heat map actually carries the shape. (The blood PNGs used by spray particles already
+        // have real RGB content, which is why those came out round without this.)
+        static Texture2D MakeHeatMask(Texture2D src)
+        {
+            if (ReferenceEquals(src, null)) return null;
+            int w = src.width, h = src.height;
+            var outTex = new Texture2D(w, h, TextureFormat.RGBA32, false);
+            var srcPix = src.GetPixels();
+            var dstPix = new Color[srcPix.Length];
+            for (int i = 0; i < srcPix.Length; i++)
+            {
+                float a = srcPix[i].a;
+                dstPix[i] = new Color(a, a, a, 1f);
+            }
+            outTex.SetPixels(dstPix);
+            outTex.Apply();
+            return outTex;
+        }
+
         static Texture2D MakeSoftCircle(int size)
         {
             var tex = new Texture2D(size, size, TextureFormat.RGBA32, false);

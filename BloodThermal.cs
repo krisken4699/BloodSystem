@@ -447,9 +447,27 @@ namespace BloodSystem
         // off with the same gaussian the visible decal uses, so the hot area is the blood, not the
         // quad. Alpha blending is left ON for the same reason — rendering transparents as opaque
         // re-squares the decal by making the fully-transparent corners draw as solid heat.
+        // Maps a decal's visible texture to an RGB-encoded copy of its shape. Needed because the
+        // thermal shader samples _ThermalHeatMap as RGB, while the procedural circle textures
+        // carry their shape in alpha only with RGB left pure white.
+        static readonly Dictionary<Texture, Texture> _heatMasks = new Dictionary<Texture, Texture>();
+
+        internal static void RegisterHeatMask(Texture visible, Texture heat)
+        {
+            if (ReferenceEquals(visible, null) || ReferenceEquals(heat, null)) return;
+            _heatMasks[visible] = heat;
+        }
+
+        static Texture HeatMaskFor(Texture visible)
+        {
+            if (ReferenceEquals(visible, null)) return null;
+            Texture heat;
+            return _heatMasks.TryGetValue(visible, out heat) ? heat : visible;
+        }
+
         static void ApplyShapeProps(Material m)
         {
-            Texture shape = m.mainTexture;
+            Texture shape = HeatMaskFor(m.mainTexture);
             bool hasShape = !ReferenceEquals(shape, null);
 
             m.SetFloat(P_TRANSVIS,    1f);   // decals are transparent quads; thermal hides those by default
@@ -628,7 +646,7 @@ namespace BloodSystem
             // Same shape reasoning as ApplyShapeProps — the decal's own texture is what makes the
             // heat round instead of a square quad.
             Material sm = r.sharedMaterial;
-            Texture shape = ReferenceEquals(sm, null) ? null : sm.mainTexture;
+            Texture shape = ReferenceEquals(sm, null) ? null : HeatMaskFor(sm.mainTexture);
             bool hasShape = !ReferenceEquals(shape, null);
 
             if (_mpb == null) _mpb = new MaterialPropertyBlock();
