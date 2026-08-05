@@ -63,6 +63,7 @@ namespace BloodSystem
         internal static ConfigEntry<bool>   CfgUseVolumes;
         internal static ConfigEntry<int>    CfgDensityBlur;
         internal static ConfigEntry<bool>   CfgOpaqueInThermal;
+        internal static ConfigEntry<float>  CfgHeatMapStrength;
         internal static ConfigEntry<string> CfgApplyMode;
         internal static ConfigEntry<float>  CfgDebugForce;
 
@@ -92,8 +93,10 @@ namespace BloodSystem
                 "Sample any TemperatureVolume the map author placed to decide local ambient temperature, instead of always using Ambient Temperature C. Sampled once per group of blood when it spawns, never per frame. Most H3VR maps have no volumes at all, in which case this costs nothing.");
             CfgDensityBlur = cfg.Bind("Thermal", "Density Blur Radius", 4,
                 "Pixel radius used when measuring how densely packed with blood each part of the source splatter PNGs is. Larger = coarser dense/thin split. Only read once at startup while building the splatter sampling table. 1-16.");
-            CfgOpaqueInThermal = cfg.Bind("Thermal", "Render Blood Opaque In Thermal", true,
-                "Draw blood as solid heat on thermal instead of alpha-blending it. On is usually correct - blood decals are transparent quads, and alpha-blended heat reads as a faint smudge.");
+            CfgOpaqueInThermal = cfg.Bind("Thermal", "Render Blood Opaque In Thermal", false,
+                "Draw blood as solid heat on thermal instead of alpha-blending it. Leave OFF: blood decals are transparent quads, so turning this on makes their fully-transparent corners draw as solid heat and every splat shows up on thermal as a big square instead of a soft round blob.");
+            CfgHeatMapStrength = cfg.Bind("Thermal", "Heat Shape Strength", 1f,
+                "How strongly the decal's own texture shapes its heat on thermal (feeds _ThermalHeatMap). 1 = heat falls off with the same soft round edge you see outside thermal. 0 = flat heat across the whole quad, which looks like a square. Raise above 1 to make the hot core stand out more against the faded edge.");
             CfgApplyMode = cfg.Bind("Thermal", "Apply Mode", "Material",
                 "How heat is pushed to decals. Material: one write updates every decal sharing that material (fastest, default). PropertyBlock: writes each decal renderer individually via MaterialPropertyBlock, the same route the game's own ObjectTemperature uses. Only switch to PropertyBlock if blood does not show up on thermal at all in Material mode.");
             CfgDebugForce = cfg.Bind("Thermal", "Debug Force Intensity", -1f,
@@ -340,13 +343,7 @@ namespace BloodSystem
         {
             if (!_enabled || ReferenceEquals(m, null)) return;
 
-            m.SetFloat(P_TRANSVIS,    1f);   // decals are transparent quads; thermal hides those by default
-            m.SetFloat(P_NOALPHA,     CfgOpaqueInThermal.Value ? 1f : 0f);
-            m.SetFloat(P_HEATMAPSCL,  0f);
-            m.SetFloat(P_DISABLE,     0f);
-            m.SetFloat(P_COLORALPHA,  0f);
-            m.SetFloat(P_VERTEXCOLOR, 0f);
-            m.SetTexture(P_HEATMAP,   Texture2D.whiteTexture);
+            ApplyShapeProps(m);
 
             Cohort co;
             if (!_cohorts.TryGetValue(key.Cohort, out co)) return;
@@ -362,14 +359,38 @@ namespace BloodSystem
         internal static void MarkAlwaysHot(Material m)
         {
             if (!_enabled || ReferenceEquals(m, null)) return;
-            m.SetFloat(P_TRANSVIS,    1f);
+            ApplyShapeProps(m);
+            m.SetFloat(P_INTENSITY, _forced ? _forcedValue : _hotOffset);
+        }
+
+        // The constant, non-temperature half of the thermal property set — the part that decides
+        // what SHAPE the heat is, as opposed to how hot it is.
+        //
+        // A blood decal is a quad; its round soft-edged shape lives entirely in its texture's
+        // alpha. Outside thermal that works because the decal's own shader samples that texture.
+        // Inside thermal it does NOT: the game swaps in a replacement shader (Hidden/Thermal) and
+        // the decal's own shader never runs, so the replacement shader only knows what we hand it
+        // through these properties. Handing it a flat white heat map with scale 0 gave every decal
+        // uniform heat across its whole quad — i.e. a big square, which is exactly what showed up
+        // on thermal while the same decal looked like a soft circle outside it.
+        //
+        // Fix: feed the decal's own shape texture in as _ThermalHeatMap, which is precisely what
+        // that property is for (ObjectTemperature exposes it as thermalTexture). Heat then falls
+        // off with the same gaussian the visible decal uses, so the hot area is the blood, not the
+        // quad. Alpha blending is left ON for the same reason — rendering transparents as opaque
+        // re-squares the decal by making the fully-transparent corners draw as solid heat.
+        static void ApplyShapeProps(Material m)
+        {
+            Texture shape = m.mainTexture;
+            bool hasShape = !ReferenceEquals(shape, null);
+
+            m.SetFloat(P_TRANSVIS,    1f);   // decals are transparent quads; thermal hides those by default
             m.SetFloat(P_NOALPHA,     CfgOpaqueInThermal.Value ? 1f : 0f);
-            m.SetFloat(P_HEATMAPSCL,  0f);
             m.SetFloat(P_DISABLE,     0f);
             m.SetFloat(P_COLORALPHA,  0f);
             m.SetFloat(P_VERTEXCOLOR, 0f);
-            m.SetTexture(P_HEATMAP,   Texture2D.whiteTexture);
-            m.SetFloat(P_INTENSITY,   _forced ? _forcedValue : _hotOffset);
+            m.SetTexture(P_HEATMAP,   hasShape ? shape : Texture2D.whiteTexture);
+            m.SetFloat(P_HEATMAPSCL,  hasShape ? Mathf.Max(0f, CfgHeatMapStrength.Value) : 0f);
         }
 
         // Only does anything in the PropertyBlock fallback mode. Called from every decal spawn
@@ -536,17 +557,23 @@ namespace BloodSystem
 
         static void ApplyToRenderer(Renderer r, float v)
         {
+            // Same shape reasoning as ApplyShapeProps — the decal's own texture is what makes the
+            // heat round instead of a square quad.
+            Material sm = r.sharedMaterial;
+            Texture shape = ReferenceEquals(sm, null) ? null : sm.mainTexture;
+            bool hasShape = !ReferenceEquals(shape, null);
+
             if (_mpb == null) _mpb = new MaterialPropertyBlock();
             _mpb.Clear();
             r.GetPropertyBlock(_mpb);
             _mpb.SetFloat(P_INTENSITY,    v);
             _mpb.SetFloat(P_TRANSVIS,     1f);
             _mpb.SetFloat(P_NOALPHA,      CfgOpaqueInThermal.Value ? 1f : 0f);
-            _mpb.SetFloat(P_HEATMAPSCL,   0f);
             _mpb.SetFloat(P_DISABLE,      0f);
             _mpb.SetFloat(P_COLORALPHA,   0f);
             _mpb.SetFloat(P_VERTEXCOLOR,  0f);
-            _mpb.SetTexture(P_HEATMAP,    Texture2D.whiteTexture);
+            _mpb.SetTexture(P_HEATMAP,    hasShape ? shape : Texture2D.whiteTexture);
+            _mpb.SetFloat(P_HEATMAPSCL,   hasShape ? Mathf.Max(0f, CfgHeatMapStrength.Value) : 0f);
             r.SetPropertyBlock(_mpb);
         }
 
