@@ -320,9 +320,22 @@ namespace BloodSystem
                 _flyingDotPS.GetComponent<ParticleSystemRenderer>().material = _pelletMat;
             BuildSprayPSes();
 
+            // Every annotated patch class needs its OWN PatchAll call. Harmony's PatchAll(Type)
+            // processes exactly the type it is handed and does NOT descend into nested types, so
+            // WfxDecalMaterialGrab and OnslaughtNaturalDeathPatch — both nested inside
+            // BloodSystemPatches — had never been patched at all since the day they were written.
+            // Proven from a real log: ThermalArmHook.Prepare threw on its Type null-compare and was
+            // reported by Harmony, while WfxDecalMaterialGrab.Prepare (identical bad compare, same
+            // load) threw nothing, because it was never invoked.
+            //
+            // Consequence while they were dead: the WFX bullet-hole decal material was never
+            // grabbed (blood fell back to the cached Alloy material or the scene scan), and the
+            // Onslaught natural-death + concurrent-modification crash fix never ran.
             var harmony = new Harmony("h3vr.invent60.bloodsystem");
             harmony.PatchAll(typeof(BloodSystemPatches));
             harmony.PatchAll(typeof(ThermalArmHook));
+            harmony.PatchAll(typeof(BloodSystemPatches.WfxDecalMaterialGrab));
+            harmony.PatchAll(typeof(BloodSystemPatches.OnslaughtNaturalDeathPatch));
             Log.LogInfo("[BloodSystem] 3.3.4 loaded. FieldsOK=" + BloodSystemPatches.Ok);
 
             bool aiykePresent = BepInEx.Bootstrap.Chainloader.PluginInfos.ContainsKey("Aiyke.code_mod");
@@ -2791,17 +2804,19 @@ namespace BloodSystem
 
         // Grabs WFX decal material the moment the first bullet hole decal activates.
         // Clears _matCache so any Sprites/Default mats cached before this get replaced.
+        // internal, not the default private-for-a-nested-type: Awake has to be able to name this
+        // to pass it to PatchAll. See the PatchAll block in Awake for why that is necessary.
         [HarmonyPatch]
-        static class WfxDecalMaterialGrab
+        internal static class WfxDecalMaterialGrab
         {
             static bool _grabbed;
             static bool Prepare() => !ReferenceEquals(AccessTools.TypeByName("WFX_BulletHoleDecal"), null);
             static System.Reflection.MethodBase TargetMethod()
             {
                 var t = AccessTools.TypeByName("WFX_BulletHoleDecal");
-                if (t == null) return null;
+                if (ReferenceEquals(t, null)) return null;
                 var m = AccessTools.Method(t, "Start");
-                if (m == null) m = AccessTools.Method(t, "Awake");
+                if (ReferenceEquals(m, null)) m = AccessTools.Method(t, "Awake");
                 return m;
             }
             static void Postfix(Component __instance)
@@ -2849,14 +2864,14 @@ namespace BloodSystem
         //    original still runs afterward for everything else (difficulty/UI text, spawn calls,
         //    the player-death endgame check) completely untouched.
         [HarmonyPatch]
-        static class OnslaughtNaturalDeathPatch
+        internal static class OnslaughtNaturalDeathPatch
         {
             static bool Prepare() => !ReferenceEquals(AccessTools.TypeByName("localpcnerd.OnslaughtMode.OnslaughtManager"), null);
 
             static System.Reflection.MethodBase TargetMethod()
             {
                 var t = AccessTools.TypeByName("localpcnerd.OnslaughtMode.OnslaughtManager");
-                if (t == null) return null;
+                if (ReferenceEquals(t, null)) return null;
                 return AccessTools.Method(t, "Update");
             }
 
@@ -2866,11 +2881,11 @@ namespace BloodSystem
                 {
                     var mgrType = __instance.GetType();
                     var spawnedSosigsField = AccessTools.Field(mgrType, "spawnedSosigs");
-                    var spawnedSosigs = spawnedSosigsField != null ? spawnedSosigsField.GetValue(__instance) as System.Collections.IList : null;
+                    var spawnedSosigs = !ReferenceEquals(spawnedSosigsField, null) ? spawnedSosigsField.GetValue(__instance) as System.Collections.IList : null;
                     if (spawnedSosigs == null) return;
 
                     var killsField = AccessTools.Field(mgrType, "kills");
-                    int kills = killsField != null ? (int)killsField.GetValue(__instance) : 0;
+                    int kills = !ReferenceEquals(killsField, null) ? (int)killsField.GetValue(__instance) : 0;
 
                     Type markerType = null;
                     System.Reflection.FieldInfo sosigField = null;
@@ -2884,7 +2899,7 @@ namespace BloodSystem
                             continue;
                         }
                         if (ReferenceEquals(markerType, null)) { markerType = marker.GetType(); sosigField = AccessTools.Field(markerType, "sosig"); }
-                        if (sosigField == null) continue;
+                        if (ReferenceEquals(sosigField, null)) continue;
 
                         Sosig sosig = sosigField.GetValue(marker) as Sosig;
                         if (sosig == null)
@@ -2901,7 +2916,7 @@ namespace BloodSystem
                         }
                     }
 
-                    if (killsField != null) killsField.SetValue(__instance, kills);
+                    if (!ReferenceEquals(killsField, null)) killsField.SetValue(__instance, kills);
                 }
                 catch (Exception ex)
                 {
