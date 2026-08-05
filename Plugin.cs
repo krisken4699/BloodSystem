@@ -417,6 +417,8 @@ namespace BloodSystem
             }
             if (!ReferenceEquals(_hardCircleTex, null)) m.mainTexture = _hardCircleTex;
             else if (!ReferenceEquals(_decalTex, null)) m.mainTexture = _decalTex;
+            // Set explicitly rather than relying on new Material(src) to carry override tags.
+            m.SetOverrideTag("RenderType", "Transparent"); // see ApplyBloodProps
             _dripMatCache[key] = m;
             BloodThermal.RegisterMaterial(m, key, true);
             return m;
@@ -1077,6 +1079,7 @@ namespace BloodSystem
                 m = new Material(_fallbackDecalShader);
                 if (!ReferenceEquals(_decalTex, null)) m.mainTexture = _decalTex;
                 m.color = col;
+                m.SetOverrideTag("RenderType", "Transparent"); // see ApplyBloodProps
                 _matCache[key] = m;
                 BloodThermal.RegisterMaterial(m, key, false);
                 return m;
@@ -1116,6 +1119,15 @@ namespace BloodSystem
             if (m.HasProperty("_DstBlend")) m.SetInt("_DstBlend", 10); // OneMinusSrcAlpha
             m.DisableKeyword("_ALPHAPREMULTIPLY_ON");
             m.EnableKeyword("_ALPHABLEND_ON");
+
+            // Thermal is rendered with SetReplacementShader(shader, "RenderType"), so the tag is
+            // what decides which SubShader draws blood. Our source is Alloy/Core, whose tag is
+            // RenderType=Opaque - confirmed from THERMAL DIAG - so thermal drew every decal as a
+            // solid quad with alpha ignored, i.e. a black square around each dot, no matter what
+            // blend modes or heat map were set. Blend state is material-level and cannot change a
+            // shader tag; SetOverrideTag can, and is the same mechanism Unity's own Standard
+            // shader uses to switch itself to transparent.
+            m.SetOverrideTag("RenderType", "Transparent");
 
             // Unity Standard / legacy fallback
             if (m.HasProperty("_Metallic"))       m.SetFloat("_Metallic",       0f);
@@ -2837,15 +2849,44 @@ namespace BloodSystem
         internal static class WfxDecalMaterialGrab
         {
             static bool _grabbed;
-            static bool Prepare() => !ReferenceEquals(AccessTools.TypeByName("WFX_BulletHoleDecal"), null);
-            static System.Reflection.MethodBase TargetMethod()
+
+            // WFX_BulletHoleDecal is from the War FX asset package and does NOT exist in H3VR 1.0
+            // — "WFX mat grabbed" has never once appeared in a log. The game's own decal component
+            // is FistVR.ImpactDecal, so try that first and keep the WFX name only as a fallback
+            // for older builds. Both are looked up by name so this assembly needs no compile-time
+            // dependency on either.
+            static readonly string[] DecalTypeNames = { "FistVR.ImpactDecal", "ImpactDecal", "WFX_BulletHoleDecal" };
+
+            static System.Type FindDecalType()
             {
-                var t = AccessTools.TypeByName("WFX_BulletHoleDecal");
-                if (ReferenceEquals(t, null)) return null;
-                var m = AccessTools.Method(t, "Start");
-                if (ReferenceEquals(m, null)) m = AccessTools.Method(t, "Awake");
-                return m;
+                for (int i = 0; i < DecalTypeNames.Length; i++)
+                {
+                    var t = AccessTools.TypeByName(DecalTypeNames[i]);
+                    if (!ReferenceEquals(t, null)) return t;
+                }
+                return null;
             }
+
+            // FistVR.ImpactDecal has no Start/Awake/OnEnable at all — its only method is
+            // SetHeat(bool), called when a decal is placed, which serves the same purpose here.
+            static readonly string[] DecalMethodNames = { "Start", "Awake", "OnEnable", "SetHeat" };
+
+            static System.Reflection.MethodBase FindDecalMethod()
+            {
+                var t = FindDecalType();
+                if (ReferenceEquals(t, null)) return null;
+                for (int i = 0; i < DecalMethodNames.Length; i++)
+                {
+                    var m = AccessTools.Method(t, DecalMethodNames[i]);
+                    if (!ReferenceEquals(m, null)) return m;
+                }
+                return null;
+            }
+
+            // Verifies a real target resolves — returning null from TargetMethod throws inside
+            // Harmony, and this class has already spent its whole life silently doing nothing.
+            static bool Prepare() => !ReferenceEquals(FindDecalMethod(), null);
+            static System.Reflection.MethodBase TargetMethod() { return FindDecalMethod(); }
             static void Postfix(Component __instance)
             {
                 if (_grabbed) return;
