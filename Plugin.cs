@@ -759,16 +759,20 @@ namespace BloodSystem
                 // an absolute value. Measured absolutely, a uniformly heavy splatter PNG and a
                 // wispy one share one scale and one of them collapses into a single class - and
                 // the thresholds move depending on which PNGs happen to be installed.
-                float dMin = float.MaxValue, dMax = float.MinValue;
+                //
+                // The ends of the range are taken at percentiles rather than the outright min and
+                // max, because those are single pixels and a single pixel can be an outlier. One
+                // unusually thick spot would stretch the top of the range on its own and squash
+                // every other sample into the low bands, leaving the densest class nearly empty.
+                // Clamping to the 2nd/98th percentile makes the range describe the bulk of the
+                // image; the handful of samples outside it just saturate at 0 or 1.
+                var dSorted = imgDens.ToArray();
+                System.Array.Sort(dSorted);
+                float dLo = dSorted[Mathf.Clamp((int)(dSorted.Length * 0.02f), 0, dSorted.Length - 1)];
+                float dHi = dSorted[Mathf.Clamp((int)(dSorted.Length * 0.98f), 0, dSorted.Length - 1)];
+                float dRange = dHi - dLo;
                 for (int i = 0; i < imgDens.Count; i++)
-                {
-                    float d = imgDens[i];
-                    if (d < dMin) dMin = d;
-                    if (d > dMax) dMax = d;
-                }
-                float dRange = dMax - dMin;
-                for (int i = 0; i < imgDens.Count; i++)
-                    imgDens[i] = dRange > 1e-5f ? (imgDens[i] - dMin) / dRange : 0.5f;
+                    imgDens[i] = dRange > 1e-5f ? Mathf.Clamp01((imgDens[i] - dLo) / dRange) : 0.5f;
 
                 float norm = 1f / imgTotal;
                 for (int i = 0; i < imgUVs.Count; i++)
