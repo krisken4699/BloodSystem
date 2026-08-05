@@ -68,6 +68,7 @@ namespace BloodSystem
         internal static ConfigEntry<float>  CfgSparseCoolMult;
         internal static ConfigEntry<float>  CfgFreshIntensity;
         internal static ConfigEntry<bool>   CfgUseVolumes;
+        internal static ConfigEntry<string> CfgDensityMode;
         internal static ConfigEntry<float>  CfgDensityMin;
         internal static ConfigEntry<float>  CfgDensityMax;
         internal static ConfigEntry<int>    CfgDensityBlur;
@@ -104,10 +105,12 @@ namespace BloodSystem
                 "How bright fresh blood reads above its surroundings on thermal, in the game's own units. 27 matches a Sosig body (ObjectTemperature profile SosigBody). Raise to make fresh blood glow harder.");
             CfgUseVolumes = cfg.Bind("Thermal", "Use Temperature Volumes", true,
                 "Sample any TemperatureVolume the map author placed to decide local ambient temperature, instead of always using Ambient Temperature C. Sampled once per group of blood when it spawns, never per frame. Most H3VR maps have no volumes at all, in which case this costs nothing.");
+            CfgDensityMode = cfg.Bind("Thermal", "Density Mode", "Normalized",
+                "How a dot's thickness is judged when deciding how fast it cools. Normalized: each splatter image is measured against its own thinnest and thickest areas, so its densest parts always become the slowest-cooling class and its scattered edges the fastest - any image dropped into the mod folder works without touching anything. Absolute: thickness is compared against the fixed Density Class Min/Max below, so the same reading always means the same class in every image, and an image made only of fine mist correctly stays entirely in the fast-cooling classes. Normalized is the safer default because thickness is measured from image alpha, and the same splatter drawn at a lower opacity reads as thinner everywhere while being structurally identical.");
             CfgDensityMin = cfg.Bind("Thermal", "Density Class Min", 0.05f,
-                "Blood at or below this thickness is treated as the thinnest class - scattered droplets, cools fastest. Thickness is measured as how much of a dot's surroundings in the source image is blood, so 0.05 means about 5% covered. Fixed rather than measured per image on purpose: the same thickness then means the same thing in every splatter PNG, and an image made entirely of fine mist correctly uses only the thin classes instead of being stretched to look like it has a dense core. Check the log for the real distribution of your images.");
+                "Only used when Density Mode is Absolute. Blood at or below this thickness is treated as the thinnest class - scattered droplets, cools fastest. Thickness is how much of a dot's surroundings in the source image is blood, so 0.05 means about 5% covered. Check the log for the real distribution of your images before changing it.");
             CfgDensityMax = cfg.Bind("Thermal", "Density Class Max", 0.6f,
-                "Blood at or above this thickness is treated as the densest class - pooled blood, cools slowest and most linearly. The range between this and Density Class Min is split evenly among the classes in between.");
+                "Only used when Density Mode is Absolute. Blood at or above this thickness is treated as the densest class - pooled blood, cools slowest and most linearly. The range between this and Density Class Min is split evenly among the classes between.");
             CfgDensityBlur = cfg.Bind("Thermal", "Density Blur Radius", 4,
                 "Pixel radius used when measuring how densely packed with blood each part of the source splatter PNGs is. Larger = coarser dense/thin split. Only read once at startup while building the splatter sampling table. 1-16.");
             CfgOpaqueInThermal = cfg.Bind("Thermal", "Render Blood Opaque In Thermal", false,
@@ -147,6 +150,18 @@ namespace BloodSystem
         static bool  _keepWarm;
 
         internal static int Classes { get { return _classes; } }
+
+        // True when each image's densities should be rescaled against its own range before
+        // banding. Read directly from config so it is correct during startup CDF construction,
+        // which runs before Init().
+        internal static bool NormalizeDensity
+        {
+            get
+            {
+                return !string.Equals(CfgDensityMode.Value, "Absolute",
+                                      System.StringComparison.OrdinalIgnoreCase);
+            }
+        }
         internal static bool Enabled { get { return _enabled; } }
 
         // ── Cohorts ───────────────────────────────────────────────────────────────

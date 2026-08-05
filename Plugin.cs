@@ -754,18 +754,29 @@ namespace BloodSystem
 
                 if (imgTotal < 0.001f || imgUVs.Count == 0) continue;
 
-                // Densities are deliberately NOT rescaled per image. The value is box-blurred alpha
-                // coverage - literally "what fraction of this pixel's neighbourhood is blood" - so
-                // it already means something absolute on its own, and the same number means the
-                // same thickness in every image. Two earlier attempts normalized each image
-                // against its own range (first raw min/max, then 2nd/98th percentile) to guarantee
-                // every class got samples; that was the wrong goal. It stretched a wispy PNG until
-                // its thickest mist was labelled a dense core, inventing structure the artwork does
-                // not have. A thin image SHOULD land entirely in the thin classes.
-                //
-                // Class boundaries now come from fixed config thresholds instead. See
-                // BuildCurveClasses; LogDensityStats prints the real distribution to set them from.
                 LogDensityStats(tex.name, imgDens);
+
+                // Normalized mode (default): rescale this image against its own range so its
+                // densest areas always become the slowest-cooling class and its scattered edges
+                // the fastest. Density is box-blurred ALPHA coverage, and alpha is an artistic
+                // choice - the same splatter drawn at 60% opacity reads as thinner everywhere
+                // while being structurally identical - so an absolute reading is not portable
+                // between images. Since the blood PNGs are meant to be swapped by dropping new
+                // files in the plugin folder, anything else would need reconfiguring per image.
+                //
+                // The ends come from percentiles, not the outright min and max, because those are
+                // single pixels: one freak-dense pixel would stretch the top of the range on its
+                // own and squash everything else into the thin classes.
+                if (BloodThermal.NormalizeDensity)
+                {
+                    var dSorted = imgDens.ToArray();
+                    System.Array.Sort(dSorted);
+                    float dLo = dSorted[Mathf.Clamp((int)(dSorted.Length * 0.02f), 0, dSorted.Length - 1)];
+                    float dHi = dSorted[Mathf.Clamp((int)(dSorted.Length * 0.98f), 0, dSorted.Length - 1)];
+                    float dRange = dHi - dLo;
+                    for (int i = 0; i < imgDens.Count; i++)
+                        imgDens[i] = dRange > 1e-5f ? Mathf.Clamp01((imgDens[i] - dLo) / dRange) : 0.5f;
+                }
 
                 float norm = 1f / imgTotal;
                 for (int i = 0; i < imgUVs.Count; i++)
@@ -907,8 +918,11 @@ namespace BloodSystem
             int classes = BloodThermal.Classes;
             if (classes <= 1 || n == 0) return result;
 
-            float lo = BloodThermal.CfgDensityMin.Value;
-            float hi = BloodThermal.CfgDensityMax.Value;
+            // Normalized mode has already rescaled each image to 0-1, so the band edges are just
+            // that range; Absolute mode bands over the configured thresholds instead.
+            bool normalized = BloodThermal.NormalizeDensity;
+            float lo = normalized ? 0f : BloodThermal.CfgDensityMin.Value;
+            float hi = normalized ? 1f : BloodThermal.CfgDensityMax.Value;
             if (hi - lo < 1e-4f) { lo = 0f; hi = 1f; }
             float range = hi - lo;
 
@@ -924,7 +938,8 @@ namespace BloodSystem
             }
 
             var sb = new System.Text.StringBuilder();
-            sb.Append("[BloodSystem] Class bands over density ").Append(lo.ToString("F2"))
+            sb.Append("[BloodSystem] Class bands (").Append(normalized ? "Normalized" : "Absolute")
+              .Append(") over density ").Append(lo.ToString("F2"))
               .Append("-").Append(hi.ToString("F2")).Append(":");
             for (int c = 0; c < classes; c++)
             {
