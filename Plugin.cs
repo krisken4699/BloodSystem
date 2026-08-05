@@ -2390,9 +2390,11 @@ namespace BloodSystem
             if (ReferenceEquals(t, null)) return null;
             return AccessTools.Method(t, "ApplyCameraShader");
         }
-        static void Postfix(bool isThermal)
+        static void Postfix(Camera cam, bool isThermal)
         {
-            if (isThermal) BloodThermal.Arm();
+            if (!isThermal) return;
+            BloodThermal.Arm();
+            BloodThermal.LogThermalDiagnostics(cam);
         }
     }
 

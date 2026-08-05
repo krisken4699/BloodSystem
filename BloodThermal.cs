@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using BepInEx.Configuration;
+using FistVR;
 using UnityEngine;
 
 namespace BloodSystem
@@ -218,6 +219,73 @@ namespace BloodSystem
                           .Append(i == _steps - 1 ? "" : "  ");
                     BloodSystemPlugin.Log.LogInfo(sb.ToString());
                 }
+            }
+        }
+
+        // ── Thermal render diagnostics ────────────────────────────────────────────
+        //
+        // Fires once per scene, the first time a thermal camera renders in it. Exists because
+        // thermal renders as a flat white image in some custom maps while working normally in
+        // vanilla ones, and the difference cannot be found by reading the game's code alone —
+        // every candidate cause is scene state that only exists at runtime.
+        //
+        // The most load-bearing line is ThermalShader. PIPScope.GetThermalShader() is
+        // ManagerSingleton<FXM>.Instance.ThermalShader, and SetReplacementShader(null, ...)
+        // silently CLEARS the replacement shader rather than failing — the camera then renders
+        // the map normally and the thermal LUT/auto-gain stage runs over an ordinary image,
+        // which is a very good way to get a white screen with no error in the log.
+        static readonly HashSet<string> _diagLoggedScenes = new HashSet<string>();
+
+        internal static void LogThermalDiagnostics(Camera cam)
+        {
+            try
+            {
+                string scene = UnityEngine.SceneManagement.SceneManager.GetActiveScene().name;
+                if (!_diagLoggedScenes.Add(scene)) return;
+
+                var sb = new System.Text.StringBuilder();
+                sb.Append("[BloodSystem] THERMAL DIAG scene='").Append(scene).Append("'");
+
+                // FXM owns the thermal shader. If it is missing or its shader field is empty,
+                // there is no replacement shader and everything downstream is meaningless.
+                FXM fxm = ManagerSingleton<FXM>.Instance;
+                if (fxm == null)
+                {
+                    sb.Append(" | FXM=MISSING (no thermal shader available)");
+                }
+                else
+                {
+                    Shader ts = fxm.ThermalShader;
+                    sb.Append(" | FXM=ok ThermalShader=")
+                      .Append(ReferenceEquals(ts, null) ? "NULL" : ts.name)
+                      .Append(ReferenceEquals(ts, null) ? "" : (ts.isSupported ? " (supported)" : " (NOT SUPPORTED)"));
+                }
+
+                if (!ReferenceEquals(cam, null))
+                {
+                    sb.Append(" | cam='").Append(cam.name).Append("'")
+                      .Append(" clear=").Append(cam.clearFlags)
+                      .Append(" bg=").Append(cam.backgroundColor)
+                      .Append(" path=").Append(cam.actualRenderingPath);
+                }
+
+                // Heat sources present in the scene. Sosigs contribute one ObjectTemperature per
+                // body link, so spawning one and seeing this number not move means the Sosig
+                // never registered.
+                sb.Append(" | ObjectTemperatures=")
+                  .Append(ObjectTemperature.allTemperatureObjects == null
+                          ? -1 : ObjectTemperature.allTemperatureObjects.Count);
+                sb.Append(" TemperatureVolumes=")
+                  .Append(TemperatureVolume.volumes == null ? -1 : TemperatureVolume.volumes.Count);
+
+                sb.Append(" | ambientLight=").Append(RenderSettings.ambientLight)
+                  .Append(" ambientIntensity=").Append(RenderSettings.ambientIntensity.ToString("F2"));
+
+                BloodSystemPlugin.Log.LogInfo(sb.ToString());
+            }
+            catch (System.Exception ex)
+            {
+                BloodSystemPlugin.Log.LogWarning("[BloodSystem] THERMAL DIAG failed: " + ex.Message);
             }
         }
 
