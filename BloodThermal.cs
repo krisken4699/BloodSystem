@@ -102,11 +102,14 @@ namespace BloodSystem
                 "How heat is pushed to decals. Material: one write updates every decal sharing that material (fastest, default). PropertyBlock: writes each decal renderer individually via MaterialPropertyBlock, the same route the game's own ObjectTemperature uses. Only switch to PropertyBlock if blood does not show up on thermal at all in Material mode.");
             CfgDebugForce = cfg.Bind("Thermal", "Debug Force Intensity", -1f,
                 "Diagnostic. -1 = off (normal cooling). 0 or higher = pin every blood decal at that thermal intensity forever, ignoring all cooling. Set to 27 to check whether blood shows up on thermal at all without waiting for or fighting the cooling curve.");
+            CfgAmbientOverride = cfg.Bind("Thermal", "Thermal Ambient Intensity Override", -1f,
+                "Fixes thermal showing a flat white image in custom maps. The thermal shader adds the scene's ambient light into the heat value, so a map whose Ambient Color is not black washes everything out to white. Vanilla maps ship black ambient, which is why they look right. -1 = leave the game alone. 0 = cancel the ambient contribution entirely (try this first). 1 = the game's own untouched value. This is global, not per-map. Proper fix is to set Ambient Color to black in the map's own lighting settings.");
             CfgDebugLog = cfg.Bind("Thermal", "Debug Logging", false,
                 "Log the baked cooling schedule at startup, then every cooling step and every splash chunk count as they happen. For checking the system is actually working and how much it costs. Noisy - leave off for normal play.");
         }
 
-        internal static ConfigEntry<bool> CfgDebugLog;
+        internal static ConfigEntry<bool>  CfgDebugLog;
+        internal static ConfigEntry<float> CfgAmbientOverride;
 
         // ── Baked step tables ─────────────────────────────────────────────────────
         // _stepTime[class][i] = seconds after spawn at which step i is applied
@@ -240,6 +243,12 @@ namespace BloodSystem
         {
             try
             {
+                // PIPScope.thermalAmbientIntensity is a public static the game itself never
+                // assigns — it sits at 1 forever and feeds _ThermalAmbientStrength = value - 1.
+                // Reassert every thermal render, since scene loads can reconstruct PIPScope state.
+                if (CfgAmbientOverride.Value >= 0f)
+                    PIPScope.thermalAmbientIntensity = CfgAmbientOverride.Value;
+
                 string scene = UnityEngine.SceneManagement.SceneManager.GetActiveScene().name;
                 if (!_diagLoggedScenes.Add(scene)) return;
 
