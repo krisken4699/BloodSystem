@@ -55,7 +55,7 @@ namespace BloodSystem
         internal static ConfigEntry<bool>   CfgKeepWarm;
         internal static ConfigEntry<float>  CfgStartTempC;
         internal static ConfigEntry<float>  CfgAmbientTempC;
-        internal static ConfigEntry<float>  CfgHalfLife;
+        internal static ConfigEntry<float>  CfgCoolSeconds;
         internal static ConfigEntry<int>    CfgSteps;
         internal static ConfigEntry<float>  CfgCohortWindow;
         internal static ConfigEntry<int>    CfgClasses;
@@ -79,8 +79,8 @@ namespace BloodSystem
                 "Temperature blood leaves the body at, in Celsius. Purely a readability knob - H3VR has no real temperature units, this is converted to the game's arbitrary thermal scale.");
             CfgAmbientTempC = cfg.Bind("Thermal", "Ambient Temperature C", 20f,
                 "Temperature blood cools toward. H3VR has NO ambient temperature of any kind - no per-map, per-area or per-surface temperature exists in the game - so this has to be set here. Once blood reaches it, it is indistinguishable from the wall it is on.");
-            CfgHalfLife = cfg.Bind("Thermal", "Cooling Half Life Seconds", 8f,
-                "Seconds for blood to lose half its heat above ambient (Newton's law of cooling). Lower = cools faster. Sized so cooling plays out over a good part of the decal's lifetime instead of finishing in the first few seconds.");
+            CfgCoolSeconds = cfg.Bind("Thermal", "Cooling Seconds", 8f,
+                "How long blood takes to finish cooling and settle at the surrounding temperature. This is the WHOLE cooldown, not a half life - at this many seconds the blood is done and reads the same as the wall it is on. Replaces the old 'Cooling Half Life Seconds', which was the time to lose only half the heat and therefore took about 6x this long to actually finish.");
             CfgSteps = cfg.Bind("Thermal", "Temperature Steps", 18,
                 "How many discrete temperature shades blood passes through on its way to ambient. Nothing is computed per frame - these are solved once at startup and stepped through, so raising this costs almost nothing and makes the cooldown read as a smooth fade instead of visible jumps. 2-18.");
             CfgCohortWindow = cfg.Bind("Thermal", "Cohort Window Seconds", 10f,
@@ -352,26 +352,39 @@ namespace BloodSystem
             _stepTime = new float[_classes][];
             _heatFrac = new float[_classes][];
 
-            float k0 = Mathf.Log(2f) / Mathf.Max(0.05f, CfgHalfLife.Value);
+            float baseTau = Mathf.Max(0.25f, CfgCoolSeconds.Value);
 
             for (int c = 0; c < _classes; c++)
             {
                 // u: 0 = densest class, 1 = thinnest
                 float u = (_classes == 1) ? 0f : (float)c / (_classes - 1);
                 float linearity = Mathf.Clamp01(CfgDenseLinearity.Value) * (1f - u);
-                float k = k0 * Mathf.Lerp(1f, Mathf.Max(0.05f, CfgSparseCoolMult.Value), u);
-                // Time at which the exponential is ~98% done - the linear blend lands on ambient
-                // at the same moment so the two curves agree at both ends and only differ in shape.
-                float tau = 4f / k;
+                // Thin blood finishes sooner, not merely faster at the start - so the multiplier
+                // shortens its whole schedule rather than only steepening its curve.
+                float tau = baseTau / Mathf.Lerp(1f, Mathf.Max(0.05f, CfgSparseCoolMult.Value), u);
+                // exp(-4) = 0.018, i.e. ~98% cooled at tau, which is close enough to call settled.
+                float k = 4f / tau;
 
                 _stepTime[c] = new float[_steps];
                 _heatFrac[c] = new float[_steps];
 
+                // Steps are spaced evenly in TIME, and the temperature at each is read off the
+                // curve. The reverse - evenly spaced temperatures, solving for when each is
+                // reached - is what this used to do, and it behaves badly: on an exponential the
+                // times come out logarithmic, so the first half of the steps land in the first
+                // ~15% of the schedule where the blood is still near max heat and every shade
+                // looks identical, while the visible second half is left stretched over many
+                // seconds apiece. That reads as "nothing happens for ages, then huge jumps".
+                //
+                // Even time spacing inverts that: the big temperature drops happen early, while
+                // the blood is too hot to distinguish anyway, and the late steps are small and
+                // regular so it settles smoothly. Newton's law still sets every value; only the
+                // sampling changed.
                 for (int i = 0; i < _steps; i++)
                 {
-                    float frac = 1f - (float)i / (_steps - 1);   // step 0 = fresh, last = ambient
-                    _heatFrac[c][i] = frac;
-                    _stepTime[c][i] = (i == 0) ? 0f : SolveTime(frac, k, tau, linearity);
+                    float t = tau * i / (_steps - 1);
+                    _stepTime[c][i] = t;
+                    _heatFrac[c][i] = (i == _steps - 1) ? 0f : CoolCurve(t, k, tau, linearity);
                 }
             }
         }
@@ -383,19 +396,8 @@ namespace BloodSystem
             return Mathf.Lerp(expPart, linPart, linearity);
         }
 
-        // Bisection - the curve is monotonically decreasing, so this always converges. Runs
-        // Steps * Classes times total at startup and never again.
-        static float SolveTime(float targetFrac, float k, float tau, float linearity)
-        {
-            if (targetFrac <= 0f) return tau;
-            float lo = 0f, hi = tau;
-            for (int it = 0; it < 40; it++)
-            {
-                float mid = (lo + hi) * 0.5f;
-                if (CoolCurve(mid, k, tau, linearity) > targetFrac) lo = mid; else hi = mid;
-            }
-            return (lo + hi) * 0.5f;
-        }
+        // (The old SolveTime bisection is gone with the equal-temperature spacing it existed to
+        // support - times now come straight from the schedule, so nothing has to be solved for.)
 
         // ── Cohort lookup ─────────────────────────────────────────────────────────
 
