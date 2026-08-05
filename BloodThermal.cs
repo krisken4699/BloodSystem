@@ -81,8 +81,8 @@ namespace BloodSystem
                 "Temperature blood cools toward. H3VR has NO ambient temperature of any kind - no per-map, per-area or per-surface temperature exists in the game - so this has to be set here. Once blood reaches it, it is indistinguishable from the wall it is on.");
             CfgHalfLife = cfg.Bind("Thermal", "Cooling Half Life Seconds", 8f,
                 "Seconds for blood to lose half its heat above ambient (Newton's law of cooling). Lower = cools faster. Sized so cooling plays out over a good part of the decal's lifetime instead of finishing in the first few seconds.");
-            CfgSteps = cfg.Bind("Thermal", "Temperature Steps", 24,
-                "How many discrete temperature shades blood passes through on its way to ambient. Nothing is computed per frame - these are solved once at startup and stepped through, so raising this costs almost nothing and makes the cooldown read as a smooth fade instead of visible jumps. 2-64.");
+            CfgSteps = cfg.Bind("Thermal", "Temperature Steps", 18,
+                "How many discrete temperature shades blood passes through on its way to ambient. Nothing is computed per frame - these are solved once at startup and stepped through, so raising this costs almost nothing and makes the cooldown read as a smooth fade instead of visible jumps. 2-18.");
             CfgCohortWindow = cfg.Bind("Thermal", "Cohort Window Seconds", 10f,
                 "Blood spawned within this many seconds of other blood shares one cooling schedule and one set of materials. Lower = each splat cools on its own exact timeline but more materials are held at once; higher = fewer materials. This is what bounds memory as Lifetime goes up, so it is deliberately NOT tied to Temperature Steps.");
             CfgClasses = cfg.Bind("Thermal", "Curve Classes", 2,
@@ -185,7 +185,7 @@ namespace BloodSystem
             _forced      = _forcedValue >= 0f;
 
             _classes = Mathf.Clamp(CfgClasses.Value, 1, 4);
-            _steps   = Mathf.Clamp(CfgSteps.Value,   2, 64);
+            _steps   = Mathf.Clamp(CfgSteps.Value,   2, 18);
             _hotOffset = CfgFreshIntensity.Value;
 
             // Celsius is only here so the config reads sensibly - the game has no temperature
