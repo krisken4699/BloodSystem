@@ -3170,6 +3170,14 @@ namespace BloodSystem
                 bool isHumanModHuman = !ReferenceEquals(src, null) && src.GetComponent("HumanMarker") != null;
                 if (isHumanModHuman && !BloodSystemPlugin.CfgSplashOnHumans.Value) return;
 
+                // Sosig.ClearSosig - the despawn routine - walks EVERY link and calls
+                // LinkExplodes(Abstract) on each one. That is a corpse being cleaned up, not
+                // anything being hit, and it was firing a full 360 degree burst per link: four
+                // bursts out of a body that nobody shot, with nothing visibly coming apart. That
+                // is the "360 without a segment breaking" report. Abstract only ever arrives from
+                // that cleanup path, so it is never blood.
+                if (damClass == Damage.DamageClass.Abstract) return;
+
                 Color   col = BloodSystemPlugin.GetSosigBloodColor(src);
 
                 // LinkExplodes fires whenever a body part's integrity hits zero — that's every
@@ -3177,22 +3185,14 @@ namespace BloodSystem
                 // it as a real 360° gib burst when the game itself is actually going to spawn
                 // gib chunks (same check FistVR.Sosig.DestroyLink uses) — otherwise fall back to
                 // a normal directional spray so a plain kill doesn't look like a gib explosion.
-                // Chunks being ENABLED is not the same as the kill looking like an explosion.
-                // UsesGibs is a property of the sosig type and the chunks option is global, so
-                // this pair is true for essentially every standard sosig - and LinkExplodes fires
-                // on every kill, normally on the Torso. The result was that an ordinary bullet
-                // kill, with nothing visibly coming apart, still got the full 360 degree burst.
-                //
-                // A torso link being destroyed is just how a sosig dies; a head or limb going is
-                // what actually reads as dismemberment. So the sphere burst is now reserved for
-                // explosive damage or for a part other than the torso, and a plain kill gets the
-                // directional spray it should always have had.
+                // LinkExplodes destroys the link outright (DestroyLink ends in
+                // Destroy(link.gameObject)), so reaching here from real damage genuinely means a
+                // segment was removed and the sphere burst is earned. No need to guess from which
+                // body part it was - that was a proxy, and a wrong one.
                 bool chunksOn = !ReferenceEquals(src, null) && src.UsesGibs
                     && GM.Options != null
                     && GM.Options.SimulationOptions.SosigChunksMode == SimulationOptions.SosigChunks.Enabled;
-                bool looksDismembered = damClass == Damage.DamageClass.Explosive
-                    || __instance.BodyPart != SosigLink.SosigBodyPart.Torso;
-                bool realGib = chunksOn && looksDismembered;
+                bool realGib = chunksOn;
 
                 Vector3 dir;
                 if (!_strikeDir.TryGetValue(__instance, out dir) || dir.sqrMagnitude < 0.001f)
