@@ -1850,34 +1850,30 @@ namespace BloodSystem
                     return;
                 }
 
+                // Outer and mid rings leave together, at the instant of the hit. Only the inner
+                // jet is drawn out over half a second, so a wound reads as a burst with a short
+                // stream still running out of it rather than the whole spray arriving late.
+                SpraySprayImmediate(pos, fwd, col, explode, speedScale, burstFraction,
+                                    doFog: true, doPellet: true, doJet: false, doStain: true);
                 _instance.StartCoroutine(DoTrailingSpray(pos, fwd, col, explode, speedScale, burstFraction,
-                                                         follow, doFog: true, doPellet: false, seconds: 0.3f));
-                _instance.StartCoroutine(DoTrailingSpray(pos, fwd, col, explode, speedScale, burstFraction,
-                                                         follow, doFog: false, doPellet: true, seconds: 1f));
-                SprayJetOnly(pos, fwd, col, explode, speedScale, burstFraction);
+                                                         follow, doFog: false, doPellet: false, doJet: true,
+                                                         seconds: 0.5f));
                 return;
             }
 
             SpraySprayImmediate(pos, fwd, col, explode, speedScale, burstFraction);
         }
 
-        // Inner drops plus the surface staining, both of which belong to the instant of impact.
-        static void SprayJetOnly(Vector3 pos, Vector3 fwd, Color col, bool explode, float speedScale, float burstFraction)
-        {
-            SpraySprayImmediate(pos, fwd, col, explode, speedScale, burstFraction,
-                                doFog: false, doPellet: false, doJet: true, doStain: true);
-        }
-
-        // Releases the outer and mid layers over about a second instead of in one puff, each
-        // slice emitted wherever the wound has moved to by then. A sosig shot while running
-        // leaves a trail along its path rather than a single cloud where it used to be.
+        // Releases a layer in slices instead of one puff, each slice emitted wherever the wound
+        // has moved to by then. A sosig shot while running leaves a trail along its path rather
+        // than a single cloud where it used to be.
         //
         // The particle systems are shared singletons, so two sprays inside the same second
         // interleave their slices. Each slice still emits at a sensible place, but the layer
         // settings belong to whichever spray wrote them last.
         static IEnumerator DoTrailingSpray(Vector3 pos, Vector3 fwd, Color col, bool explode,
                                            float speedScale, float burstFraction, Transform follow,
-                                           bool doFog, bool doPellet, float seconds)
+                                           bool doFog, bool doPellet, bool doJet, float seconds)
         {
             const int   SLICES     = 6;
             const float FRONT_LOAD = 0.5f;   // released instantly, so the hit still reads as a hit
@@ -1902,7 +1898,7 @@ namespace BloodSystem
                 Vector3 at = follow != null ? follow.position : pos;
 
                 SpraySprayImmediate(at, fwd, col, explode, speedScale, burstFraction,
-                                    doFog: doFog, doPellet: doPellet, doJet: false, doStain: false,
+                                    doFog: doFog, doPellet: doPellet, doJet: doJet, doStain: false,
                                     countScale: (i == 0) ? FRONT_LOAD : trail);
                 yield return new WaitForSeconds(wait);
             }
