@@ -418,9 +418,9 @@ namespace BloodSystem
             }
             if (!ReferenceEquals(_hardCircleTex, null)) m.mainTexture = _hardCircleTex;
             else if (!ReferenceEquals(_decalTex, null)) m.mainTexture = _decalTex;
-            // Alloy reads _ColorRGBOpacityA, not _MainTex - without this the cloned source
-            // material's own albedo survives. See SetAllAlbedo.
-            SetAllAlbedo(m, m.mainTexture);
+            // cloned source material keeps its own albedo; we only override _MainTex.
+            // NOTE: writing our texture into Alloy's _ColorRGBOpacityA slot broke rendering.
+            // (albedo override removed - see SetAllAlbedo)
             // Set explicitly rather than relying on new Material(src) to carry override tags.
             m.SetOverrideTag("RenderType", "Transparent"); // see ApplyBloodProps
             _dripMatCache[key] = m;
@@ -1305,7 +1305,7 @@ namespace BloodSystem
 
         static void ApplyBloodProps(Material m, Color col)
         {
-            SetAllAlbedo(m, m.mainTexture);
+            // (albedo override removed - see SetAllAlbedo)
             if (m.HasProperty("_Color"))          m.SetColor("_Color",          col);
 
             // Alloy Core PBR — non-metallic, matte blood.

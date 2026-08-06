@@ -33,6 +33,13 @@
     <Content Include="*.png">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
+    <!-- Shipped so a fresh install already has a known-good decal material and never has to
+         scan the scene for one. The scan picks whatever Alloy renderer happens to be loaded,
+         which differs per map - inconsistent looks between maps, and on a map where a bullet
+         hole scored highest it handed blood the 2x2 bullet-hole atlas. -->
+    <Content Include="alloy_mat.cache">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
   </ItemGroup>
 
 </Project>

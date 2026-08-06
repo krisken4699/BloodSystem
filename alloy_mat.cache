@@ -1,0 +1,8 @@
+shaderName=Alloy/Core
+renderQueue=3000
+keywords=EFFECT_BUMP,_ALPHAPREMULTIPLY_ON,_RIM_ON
+_SrcBlend=1
+_DstBlend=10
+_ZWrite=0
+_Mode=3.000
+_Cutoff=0.500
