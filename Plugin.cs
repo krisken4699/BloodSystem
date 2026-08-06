@@ -1168,33 +1168,6 @@ namespace BloodSystem
         // Scan ALL renderers in scene for best Alloy transparent material.
         // Priority: Alloy/Core rq>2000 > other non-additive Alloy rq>2000 > Alloy/Core opaque.
         // Additive shaders excluded — additive blend on static mesh = glow, not blood.
-        // A renderer belonging to any kind of decal — bullet holes and the like. Matched by
-        // component and object name rather than a hard type reference so it also catches decal
-        // systems from other mods, which this assembly cannot reference at compile time.
-        static bool IsDecalRenderer(Renderer r)
-        {
-            Transform t = r.transform;
-            while (t != null)
-            {
-                string n = t.gameObject.name;
-                if (n.IndexOf("Decal", System.StringComparison.OrdinalIgnoreCase) >= 0
-                 || n.IndexOf("BulletHole", System.StringComparison.OrdinalIgnoreCase) >= 0
-                 || n.IndexOf("Bullet Hole", System.StringComparison.OrdinalIgnoreCase) >= 0)
-                    return true;
-
-                var comps = t.GetComponents<MonoBehaviour>();
-                for (int i = 0; i < comps.Length; i++)
-                {
-                    if (ReferenceEquals(comps[i], null)) continue;
-                    string cn = comps[i].GetType().Name;
-                    if (cn.IndexOf("Decal", System.StringComparison.OrdinalIgnoreCase) >= 0
-                     || cn.IndexOf("Hole", System.StringComparison.OrdinalIgnoreCase) >= 0)
-                        return true;
-                }
-                t = t.parent;
-            }
-            return false;
-        }
 
         internal static IEnumerator TryGrabAlloyFromScene()
         {
@@ -1216,14 +1189,17 @@ namespace BloodSystem
                     // Exclude additive shaders: additive blend on mesh = glow, not blood.
                     if (sn.IndexOf("Additive", System.StringComparison.OrdinalIgnoreCase) >= 0) continue;
 
-                    // Never inherit from another decal. A bullet hole is Alloy/Core at renderQueue
-                    // 3000, so it scored the maximum 150 and won this scan outright - and its
-                    // albedo is a 2x2 atlas of bullet holes, which is where "every blood dot is
-                    // four bullet holes" came from. It only ever showed up on a fresh install,
-                    // since an existing alloy_mat.cache means this scan never runs at all, and the
-                    // cache stores just the shader name and blend state so a restart looked fine.
-                    if (IsDecalRenderer(r)) continue;
-
+                    // Decals are deliberately NOT excluded here. A bullet hole is Alloy/Core at
+                    // renderQueue 3000, so it wins this scan - and that is wanted. Unity only
+                    // compiles the shader variants real game assets actually use, so a variant
+                    // taken from a live decal is guaranteed to render; one assembled from guessed
+                    // keywords can come out invisible, which is what made splatter permanently
+                    // invisible before 3.3.0. The decal is the most reliable source available.
+                    //
+                    // What it must NOT contribute is its albedo, a 2x2 atlas of bullet holes -
+                    // that is where "every blood dot is four bullet holes" came from, and it is
+                    // fixed at the source now by writing our texture into every albedo slot the
+                    // shader has (SetAllAlbedo), rather than by refusing the material.
                     alloyCount++;
 
                     // Score: prefer Alloy/Core > other Alloy, prefer transparent (rq>2000) > opaque.
