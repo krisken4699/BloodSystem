@@ -1913,14 +1913,19 @@ namespace BloodSystem
             // total was unchanged, but only a fraction was on screen at any moment. Most goes out
             // at impact and the rest trails behind it.
             float trail = (1f - FRONT_LOAD) / (SLICES - 1);
+            bool wasFollowing = follow != null;
 
             for (int i = 0; i < SLICES; i++)
             {
                 // Only the emission POINT moves. The systems simulate in world space, so blood
                 // already in the air stays where it came out - a later slice simply starts from
                 // wherever the wound has got to, which is what draws the trail.
-                Vector3 at = pos;
-                if (follow != null) at = follow.position;   // Unity null: destroyed link falls back
+                // If the wound itself is gone - the segment was destroyed mid-trail - stop.
+                // Falling back to the original point meant blood kept pouring out of thin air
+                // where a head used to be, long after it had come off.
+                if (i > 0 && wasFollowing && follow == null) yield break;
+
+                Vector3 at = follow != null ? follow.position : pos;
 
                 SpraySprayImmediate(at, fwd, col, explode, speedScale, burstFraction,
                                     doFog: doFog, doPellet: doPellet, doJet: false, doStain: false,
@@ -3196,10 +3201,14 @@ namespace BloodSystem
                 // Destroy(link.gameObject)), so reaching here from real damage genuinely means a
                 // segment was removed and the sphere burst is earned. No need to guess from which
                 // body part it was - that was a proxy, and a wrong one.
-                bool chunksOn = !ReferenceEquals(src, null) && src.UsesGibs
-                    && GM.Options != null
-                    && GM.Options.SimulationOptions.SosigChunksMode == SimulationOptions.SosigChunks.Enabled;
-                bool realGib = chunksOn;
+                // Not gated on the SosigChunks option any more. That setting only decides whether
+                // VANILLA spawns its chunk props - it says nothing about whether a segment was
+                // destroyed, which is the only thing that matters here. With chunks turned off a
+                // destroyed segment was falling through to the bleeding-wound path: spray released
+                // over a second instead of all at once, and a narrow cone of splash instead of a
+                // 360 one, so a head coming apart kept dribbling blood into the air where it used
+                // to be and left almost no splatter.
+                bool realGib = true;
 
                 Vector3 dir;
                 if (!_strikeDir.TryGetValue(__instance, out dir) || dir.sqrMagnitude < 0.001f)
