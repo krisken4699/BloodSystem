@@ -149,7 +149,10 @@ namespace BloodSystem
         static readonly Vector3 _tanLight = new Vector3(0.5f, 0.5f, 0.707f).normalized;
 
         // Same 10 brightness levels used by BuildDotMesh — keeps material cache bounded (10 entries per color).
-        internal static readonly float[] BRIGHT_LEVELS = { 0.700f, 0.733f, 0.767f, 0.800f, 0.833f, 0.867f, 0.900f, 0.933f, 0.967f, 1.000f };
+        // Was 0.70-1.00, a 30% spread that is essentially invisible on a colour this dark -
+        // the variation was there the whole time and simply could not be seen. Widened to
+        // 0.40-1.00 so the darkest dots are clearly under half the brightness of the lightest.
+        internal static readonly float[] BRIGHT_LEVELS = { 0.400f, 0.467f, 0.533f, 0.600f, 0.667f, 0.733f, 0.800f, 0.867f, 0.933f, 1.000f };
         static readonly float[] _brightLevels = BRIGHT_LEVELS;
         static Color BrightTint(Color col)
         {
