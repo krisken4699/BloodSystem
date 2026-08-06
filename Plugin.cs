@@ -1865,14 +1865,18 @@ namespace BloodSystem
             // along its path instead of one puff hanging in the air behind it.
             if (!ReferenceEquals(_instance, null))
             {
-                // A 360 burst means the part came apart, so there is nothing left to trail from -
-                // it stays put regardless of what the rest of the body does.
-                Transform trailTarget = explode ? null : follow;
+                // A segment coming apart is one event, not a stream - it all leaves at once and
+                // there is nothing left behind to trail from either.
+                if (explode)
+                {
+                    SpraySprayImmediate(pos, fwd, col, explode, speedScale, burstFraction);
+                    return;
+                }
 
                 _instance.StartCoroutine(DoTrailingSpray(pos, fwd, col, explode, speedScale, burstFraction,
-                                                         trailTarget, doFog: true, doPellet: false, seconds: 0.3f));
+                                                         follow, doFog: true, doPellet: false, seconds: 0.3f));
                 _instance.StartCoroutine(DoTrailingSpray(pos, fwd, col, explode, speedScale, burstFraction,
-                                                         trailTarget, doFog: false, doPellet: true, seconds: 1f));
+                                                         follow, doFog: false, doPellet: true, seconds: 1f));
                 SprayJetOnly(pos, fwd, col, explode, speedScale, burstFraction);
                 return;
             }
