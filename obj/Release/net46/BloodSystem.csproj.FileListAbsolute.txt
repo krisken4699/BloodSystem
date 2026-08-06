@@ -27,3 +27,4 @@ C:\Users\Hp\Desktop\BloodSystem_v3\obj\Release\net46\BloodSystem.pdb
 C:\Users\Hp\Desktop\BloodSystem_v3\bin\Release\net46\icon.png
 C:\Users\Hp\Desktop\BloodSystem_v3\bin\Release\net46\dot normal.png
 C:\Users\Hp\Desktop\BloodSystem_v3\bin\Release\net46\noise.png
+C:\Users\Hp\Desktop\BloodSystem_v3\bin\Release\net46\alloy_mat.cache

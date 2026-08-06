@@ -1557,9 +1557,30 @@ namespace BloodSystem
                     }
                 }
 
-                const float BIN_S = 0.025f;
+                // Animation steps are CAPPED and stretched over the shot's own flight time, rather
+                // than being one fixed 0.025s slice of flight each.
+                //
+                // Every step costs a separate BuildDotMesh call, and each of those emits its own
+                // set of chunks - GameObject, mesh, renderer, material per brightness level per
+                // density class. Slicing by a fixed time meant a distant shot, or a slow bullet,
+                // produced more steps and therefore multiplied the whole chunk count: a 40m shot
+                // ran 3 steps and a slow pistol 4, so the real cost was three to four times the
+                // per-step figure. Distance was silently a performance setting.
+                //
+                // With a cap the far shot costs exactly what the near one does; the steps simply
+                // spread further apart in time to still track the dots' flight. Close range needs
+                // no animation at all - the flight is over in a few milliseconds - so it collapses
+                // to a single step and one BuildDotMesh.
+                const int   MAX_ANIM_STEPS   = 3;
+                const float NO_ANIM_DISTANCE = 3f;
                 var staticBins = new Dictionary<int, List<DotData>>();
                 var dynBins    = new Dictionary<int, Dictionary<Transform, List<DotData>>>();
+
+                // Furthest hit decides how the steps are spread, so it has to be known before
+                // anything is binned. Collected in the ray loop below, applied after.
+                var pending    = new List<DotData>();
+                var pendingPar = new List<Transform>();
+                float maxDist  = 0f;
 
                 if (_flyBuf == null || _flyBuf.Length < N) _flyBuf = new ParticleSystem.Particle[N];
                 int flyCount = 0;
@@ -1597,7 +1618,7 @@ namespace BloodSystem
                     if (!foundHit) continue;
 
                     float dotR = CfgDotSize.Value * Mathf.Clamp(1f + h.distance * scaleSlope, 1f, scaleMax);
-                    int   bin  = Mathf.FloorToInt(h.distance / projSpeed / BIN_S);
+                    if (h.distance > maxDist) maxDist = h.distance;
 
                     float sinAngle  = Mathf.Abs(Vector3.Dot(dir, h.normal));
                     float elong     = Mathf.Clamp(1f / Mathf.Max(0.15f, sinAngle), 1f, 8f);
@@ -1609,17 +1630,9 @@ namespace BloodSystem
                     Transform par   = hitRb != null ? hitRb.transform : null;
                     var dd = new DotData(h.point, h.normal, dotR, dark, bright, tanNorm, elongVec, elong, h.distance, curveClass);
 
-                    if (par == null)
-                    {
-                        if (!staticBins.ContainsKey(bin)) staticBins[bin] = new List<DotData>();
-                        staticBins[bin].Add(dd);
-                    }
-                    else
-                    {
-                        if (!dynBins.ContainsKey(bin))      dynBins[bin] = new Dictionary<Transform, List<DotData>>();
-                        if (!dynBins[bin].ContainsKey(par)) dynBins[bin][par] = new List<DotData>();
-                        dynBins[bin][par].Add(dd);
-                    }
+                    // Held until the furthest hit is known, then binned against it.
+                    pending.Add(dd);
+                    pendingPar.Add(par);
 
                     if (animated && !ReferenceEquals(_flyingDotPS, null) && flyCount < _flyBuf.Length)
                     {
@@ -1633,6 +1646,34 @@ namespace BloodSystem
                         flyCount++;
                     }
                 }
+
+                // Spread the capped steps across this shot's own reach. A dot landing at half the
+                // furthest distance falls in the middle step regardless of whether "furthest" is
+                // four metres or forty, so the step count - and with it the chunk count - no
+                // longer depends on how far away the wall was.
+                int steps = (!animated || maxDist < NO_ANIM_DISTANCE) ? 1 : MAX_ANIM_STEPS;
+                float binSpan = Mathf.Max(0.0001f, maxDist) / steps;
+                for (int i = 0; i < pending.Count; i++)
+                {
+                    DotData dd    = pending[i];
+                    Transform par = pendingPar[i];
+                    int bin = Mathf.Clamp((int)(dd.Dist / binSpan), 0, steps - 1);
+
+                    if (par == null)
+                    {
+                        if (!staticBins.ContainsKey(bin)) staticBins[bin] = new List<DotData>();
+                        staticBins[bin].Add(dd);
+                    }
+                    else
+                    {
+                        if (!dynBins.ContainsKey(bin))      dynBins[bin] = new Dictionary<Transform, List<DotData>>();
+                        if (!dynBins[bin].ContainsKey(par)) dynBins[bin][par] = new List<DotData>();
+                        dynBins[bin][par].Add(dd);
+                    }
+                }
+                // Each step now covers binSpan metres of flight, so its wait is that distance's
+                // travel time - keeping the decals landing with the dots that are still in flight.
+                float binSeconds = binSpan / projSpeed;
 
                 if (staticBins.Count == 0 && dynBins.Count == 0) return;
 
@@ -1672,7 +1713,7 @@ namespace BloodSystem
                 }
                 else
                 {
-                    _instance.StartCoroutine(DoDelayedSpawn(staticBins, dynBins, col, BIN_S, shotList));
+                    _instance.StartCoroutine(DoDelayedSpawn(staticBins, dynBins, col, binSeconds, shotList));
                 }
             }
             catch (Exception ex) { Log.LogError("[BloodSystem] SpawnProjection: " + ex); }
@@ -3108,7 +3149,13 @@ namespace BloodSystem
 
             // Verifies a real target resolves — returning null from TargetMethod throws inside
             // Harmony, and this class has already spent its whole life silently doing nothing.
-            static bool Prepare() => !ReferenceEquals(FindDecalMethod(), null);
+            // Disabled. This existed only to find a decal material at runtime, which the
+            // shipped alloy_mat.cache now supplies before anything spawns. It was dead code
+            // for the mod's entire life anyway - nested patch classes are never passed to
+            // PatchAll - and the one time it did run it grabbed a bullet-hole material and
+            // put that 2x2 atlas on the blood. A second route to a known bug, with nothing
+            // left to gain.
+            static bool Prepare() => false;
             static System.Reflection.MethodBase TargetMethod() { return FindDecalMethod(); }
             static void Postfix(Component __instance)
             {
