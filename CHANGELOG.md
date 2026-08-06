@@ -1,3 +1,6 @@
+## 3.4.1
+- fixed :)
+
 ## 3.4.0
 - Now works with thermals. Blood temperature starts at 36°C and slowly cools down to 20°C.
 

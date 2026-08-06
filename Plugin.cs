@@ -31,7 +31,7 @@ namespace BloodSystem
         }
     }
 
-    [BepInPlugin("h3vr.invent60.bloodsystem", "Blood System", "3.4.0")]
+    [BepInPlugin("h3vr.invent60.bloodsystem", "Blood System", "3.4.1")]
     // Soft dependency (no hard requirement, no compile-time reference to Aiyke's assembly) purely
     // to control load order: if Aiyke IS installed, BepInEx loads it before us, so its Harmony
     // patches already exist by the time our Awake runs TryOverrideAiykePenetration below.
@@ -149,7 +149,7 @@ namespace BloodSystem
         static readonly Vector3 _tanLight = new Vector3(0.5f, 0.5f, 0.707f).normalized;
 
         // Same 10 brightness levels used by BuildDotMesh — keeps material cache bounded (10 entries per color).
-        internal static readonly float[] BRIGHT_LEVELS = { 0.700f, 0.733f, 0.767f, 0.800f, 0.833f, 0.867f, 0.900f, 0.933f, 0.967f, 1.000f };
+        internal static readonly float[] BRIGHT_LEVELS = { 0.600f, 0.644f, 0.689f, 0.733f, 0.778f, 0.822f, 0.867f, 0.911f, 0.956f, 1.000f };
         static readonly float[] _brightLevels = BRIGHT_LEVELS;
         static Color BrightTint(Color col)
         {
@@ -348,7 +348,7 @@ namespace BloodSystem
             harmony.PatchAll(typeof(ThermalArmHook));
             harmony.PatchAll(typeof(BloodSystemPatches.WfxDecalMaterialGrab));
             harmony.PatchAll(typeof(BloodSystemPatches.OnslaughtNaturalDeathPatch));
-            Log.LogInfo("[BloodSystem] 3.4.0 loaded. FieldsOK=" + BloodSystemPatches.Ok);
+            Log.LogInfo("[BloodSystem] 3.4.1 loaded. FieldsOK=" + BloodSystemPatches.Ok);
 
             bool aiykePresent = BepInEx.Bootstrap.Chainloader.PluginInfos.ContainsKey("Aiyke.code_mod");
             if (aiykePresent)

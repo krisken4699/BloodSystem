@@ -1,6 +1,6 @@
 {
     "name": "Blood_System",
-    "version_number": "3.4.0",
+    "version_number": "3.4.1",
     "website_url": "",
     "description": "Realistic blood splatter from bullet exit wounds. Animated flying dots, spray, and drip stains. Real penetration detection — armor stops and ricochets produce no splatter.",
     "dependencies": [
