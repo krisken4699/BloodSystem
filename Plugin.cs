@@ -882,6 +882,25 @@ namespace BloodSystem
             catch (Exception ex) { Log.LogWarning("[BloodSystem] LogClassDistribution: " + ex.Message); }
         }
 
+        // How many landing steps a shot gets, from how far its furthest dot travelled.
+        //
+        // Every step is a separate BuildDotMesh call emitting its own chunks, so this is the
+        // single knob that decides what a shot costs. Anchored on the distances that matter and
+        // interpolated between, rather than derived from flight time - flight time made the count
+        // depend on bullet speed too, so a slow pistol quietly cost more than a rifle.
+        //
+        //   under 3m : 1  - the flight is over in milliseconds, animating it shows nothing
+        //         3m : 1
+        //        10m : 2
+        //        40m : 5  - and capped there, however far the shot reaches
+        static int AnimStepsForDistance(float dist)
+        {
+            if (dist <= 3f)  return 1;
+            if (dist <= 10f) return Mathf.RoundToInt(Mathf.Lerp(1f, 2f, (dist -  3f) /  7f));
+            if (dist <= 40f) return Mathf.RoundToInt(Mathf.Lerp(2f, 5f, (dist - 10f) / 30f));
+            return 5;
+        }
+
         // Separable box blur with a sliding window — each output pixel adds the value entering the
         // window and subtracts the one leaving, so the cost is the same whatever the radius. The
         // naive version reread the whole window per pixel, which made a large radius unaffordable
@@ -1571,7 +1590,6 @@ namespace BloodSystem
                 // spread further apart in time to still track the dots' flight. Close range needs
                 // no animation at all - the flight is over in a few milliseconds - so it collapses
                 // to a single step and one BuildDotMesh.
-                const int   MAX_ANIM_STEPS   = 3;
                 const float NO_ANIM_DISTANCE = 3f;
                 var staticBins = new Dictionary<int, List<DotData>>();
                 var dynBins    = new Dictionary<int, Dictionary<Transform, List<DotData>>>();
@@ -1651,7 +1669,7 @@ namespace BloodSystem
                 // furthest distance falls in the middle step regardless of whether "furthest" is
                 // four metres or forty, so the step count - and with it the chunk count - no
                 // longer depends on how far away the wall was.
-                int steps = (!animated || maxDist < NO_ANIM_DISTANCE) ? 1 : MAX_ANIM_STEPS;
+                int steps = (!animated || maxDist < NO_ANIM_DISTANCE) ? 1 : AnimStepsForDistance(maxDist);
                 float binSpan = Mathf.Max(0.0001f, maxDist) / steps;
                 for (int i = 0; i < pending.Count; i++)
                 {
@@ -1811,15 +1829,70 @@ namespace BloodSystem
 
         // explode=true fires a 360° sphere burst. speedScale > 1 → longer lifetime + faster particles.
         // burstFraction (0-1) scales down emit counts for wound bursts vs full gib bursts.
-        internal static void SpawnBloodSpray(Vector3 pos, Vector3 fwd, Color col, bool explode = false, float speedScale = 1f, float burstFraction = 1f)
+        // follow: the body part the blood came out of, so a staggered spray tracks it. Null for a
+        // stationary source.
+        internal static void SpawnBloodSpray(Vector3 pos, Vector3 fwd, Color col, bool explode = false, float speedScale = 1f, float burstFraction = 1f, Transform follow = null)
         {
             if (!CfgEnabled.Value || !CfgSprayEnabled.Value) return;
+
+            // The outer and mid layers are released over about a second rather than all at once.
+            // Emitted in one go they mark the single spot the sosig occupied at the instant it was
+            // hit; released in slices, each slice comes out wherever the body has moved to by
+            // then, so a sosig that is running when it takes the hit leaves a short trail of spray
+            // along its path instead of one puff hanging in the air behind it.
+            if (!ReferenceEquals(_instance, null))
+            {
+                _instance.StartCoroutine(DoTrailingSpray(pos, fwd, col, explode, speedScale, burstFraction, follow));
+                SprayJetOnly(pos, fwd, col, explode, speedScale, burstFraction);
+                return;
+            }
+
+            SpraySprayImmediate(pos, fwd, col, explode, speedScale, burstFraction);
+        }
+
+        // Inner drops plus the surface staining, both of which belong to the instant of impact.
+        static void SprayJetOnly(Vector3 pos, Vector3 fwd, Color col, bool explode, float speedScale, float burstFraction)
+        {
+            SpraySprayImmediate(pos, fwd, col, explode, speedScale, burstFraction,
+                                doFog: false, doPellet: false, doJet: true, doStain: true);
+        }
+
+        // Releases the outer and mid layers over about a second instead of in one puff, each
+        // slice emitted wherever the wound has moved to by then. A sosig shot while running
+        // leaves a trail along its path rather than a single cloud where it used to be.
+        //
+        // The particle systems are shared singletons, so two sprays inside the same second
+        // interleave their slices. Each slice still emits at a sensible place, but the layer
+        // settings belong to whichever spray wrote them last.
+        static IEnumerator DoTrailingSpray(Vector3 pos, Vector3 fwd, Color col, bool explode,
+                                           float speedScale, float burstFraction, Transform follow)
+        {
+            const int   SLICES  = 8;
+            const float SECONDS = 1f;
+            float wait = SECONDS / SLICES;
+            float share = 1f / SLICES;
+
+            for (int i = 0; i < SLICES; i++)
+            {
+                Vector3 at = pos;
+                if (follow != null) at = follow.position;   // Unity null: destroyed link falls back
+
+                SpraySprayImmediate(at, fwd, col, explode, speedScale, burstFraction,
+                                    doFog: true, doPellet: true, doJet: false, doStain: false,
+                                    countScale: share);
+                yield return new WaitForSeconds(wait);
+            }
+        }
+
+        static void SpraySprayImmediate(Vector3 pos, Vector3 fwd, Color col, bool explode, float speedScale, float burstFraction,
+                                        bool doFog = true, bool doPellet = true, bool doJet = true, bool doStain = true, float countScale = 1f)
+        {
             Quaternion rot = Quaternion.LookRotation(fwd);
             float sc = explode ? Mathf.Clamp(speedScale, 0.2f, 2.5f) : 1f;
             float bf = Mathf.Clamp01(burstFraction);
 
             // ── Outer fog: slow mist, blooms wide ────────────────────────────────
-            if (!ReferenceEquals(_fogPS, null))
+            if (doFog && !ReferenceEquals(_fogPS, null))
             {
                 _fogPS.transform.position = pos;
                 _fogPS.transform.rotation = rot;
@@ -1831,7 +1904,7 @@ namespace BloodSystem
                     mn.startSpeed    = new ParticleSystem.MinMaxCurve(0.5f * sc, 2.0f * sc);
                     var sh = _fogPS.shape;
                     sh.shapeType = ParticleSystemShapeType.Sphere; sh.radius = 0.3f;
-                    _fogPS.Emit(Mathf.RoundToInt(500 * bf));
+                    _fogPS.Emit(Mathf.RoundToInt(500 * bf * countScale));
                 }
                 else
                 {
@@ -1839,12 +1912,12 @@ namespace BloodSystem
                     mn.startSpeed    = new ParticleSystem.MinMaxCurve(0.3f, 1.2f);
                     var sh = _fogPS.shape;
                     sh.shapeType = ParticleSystemShapeType.ConeShell; sh.angle = 85f; sh.radius = 0.02f;
-                    _fogPS.Emit(500);
+                    _fogPS.Emit(Mathf.RoundToInt(500 * countScale));
                 }
             }
 
             // ── Mid fog: medium blobs, moderate speed ─────────────────────────────
-            if (!ReferenceEquals(_pelletPS, null))
+            if (doPellet && !ReferenceEquals(_pelletPS, null))
             {
                 _pelletPS.transform.position = pos;
                 _pelletPS.transform.rotation = rot;
@@ -1856,7 +1929,7 @@ namespace BloodSystem
                     mn.startSpeed    = new ParticleSystem.MinMaxCurve(1.5f * sc, 5.0f * sc);
                     var sh = _pelletPS.shape;
                     sh.shapeType = ParticleSystemShapeType.Sphere; sh.radius = 0.05f;
-                    _pelletPS.Emit(Mathf.RoundToInt(600 * bf));
+                    _pelletPS.Emit(Mathf.RoundToInt(600 * bf * countScale));
                 }
                 else
                 {
@@ -1864,12 +1937,12 @@ namespace BloodSystem
                     mn.startSpeed    = new ParticleSystem.MinMaxCurve(1.5f, 4.0f);
                     var sh = _pelletPS.shape;
                     sh.shapeType = ParticleSystemShapeType.Cone; sh.angle = 20f; sh.radius = 0.02f;
-                    _pelletPS.Emit(400);
+                    _pelletPS.Emit(Mathf.RoundToInt(400 * countScale));
                 }
             }
 
             // ── Inner drops: fast, dense core ─────────────────────────────────────
-            if (!ReferenceEquals(_jetPS, null))
+            if (doJet && !ReferenceEquals(_jetPS, null))
             {
                 _jetPS.transform.position = pos;
                 _jetPS.transform.rotation = rot;
@@ -1881,7 +1954,7 @@ namespace BloodSystem
                     mn.startSpeed    = new ParticleSystem.MinMaxCurve(3.0f * sc, 9.0f * sc);
                     var sh = _jetPS.shape;
                     sh.shapeType = ParticleSystemShapeType.Sphere; sh.radius = 0.03f;
-                    _jetPS.Emit(Mathf.RoundToInt(300 * bf));
+                    _jetPS.Emit(Mathf.RoundToInt(300 * bf * countScale));
                 }
                 else
                 {
@@ -1889,12 +1962,14 @@ namespace BloodSystem
                     mn.startSpeed    = new ParticleSystem.MinMaxCurve(8.0f, 18.0f);
                     var sh = _jetPS.shape;
                     sh.shapeType = ParticleSystemShapeType.Cone; sh.angle = 5f; sh.radius = 0.005f;
-                    _jetPS.Emit(200);
+                    _jetPS.Emit(Mathf.RoundToInt(200 * countScale));
                 }
             }
 
             // Direct surface staining: immediate raycasts approximate where spray particles land.
             // Avoids particle-polling; reliable at any range since it's not tied to particle travel distance.
+            // Runs once with the initial burst, never per trail slice.
+            if (doStain)
             {
                 Vector3 right3 = Mathf.Abs(Vector3.Dot(fwd, Vector3.up)) > 0.9f ? Vector3.forward : Vector3.up;
                 right3 = Vector3.Cross(right3, fwd).normalized;
@@ -2894,7 +2969,8 @@ namespace BloodSystem
 
                 var shotList = BloodSystemPlugin.StartShotGroup();
                 BloodSystemPlugin.SpawnProjection(exitPt, dir, src, spd, false, shotList, bloodScale);
-                BloodSystemPlugin.SpawnBloodSpray(exitPt, dir, col, false, 1f, bloodScale);
+                BloodSystemPlugin.SpawnBloodSpray(exitPt, dir, col, false, 1f, bloodScale,
+                                                  __instance != null ? __instance.transform : null);
                 BloodSystemPlugin.SpawnBloodDrops(exitPt,  dir, col, Mathf.Max(1, Mathf.RoundToInt(10 * bloodScale)), shotList);
                 BloodSystemPlugin.SpawnBloodDrops(entryPt, -dir, col, Mathf.Max(1, Mathf.RoundToInt(8 * bloodScale)), shotList);
             }
@@ -3062,9 +3138,22 @@ namespace BloodSystem
                 // it as a real 360° gib burst when the game itself is actually going to spawn
                 // gib chunks (same check FistVR.Sosig.DestroyLink uses) — otherwise fall back to
                 // a normal directional spray so a plain kill doesn't look like a gib explosion.
-                bool realGib = !ReferenceEquals(src, null) && src.UsesGibs
+                // Chunks being ENABLED is not the same as the kill looking like an explosion.
+                // UsesGibs is a property of the sosig type and the chunks option is global, so
+                // this pair is true for essentially every standard sosig - and LinkExplodes fires
+                // on every kill, normally on the Torso. The result was that an ordinary bullet
+                // kill, with nothing visibly coming apart, still got the full 360 degree burst.
+                //
+                // A torso link being destroyed is just how a sosig dies; a head or limb going is
+                // what actually reads as dismemberment. So the sphere burst is now reserved for
+                // explosive damage or for a part other than the torso, and a plain kill gets the
+                // directional spray it should always have had.
+                bool chunksOn = !ReferenceEquals(src, null) && src.UsesGibs
                     && GM.Options != null
                     && GM.Options.SimulationOptions.SosigChunksMode == SimulationOptions.SosigChunks.Enabled;
+                bool looksDismembered = damClass == Damage.DamageClass.Explosive
+                    || __instance.BodyPart != SosigLink.SosigBodyPart.Torso;
+                bool realGib = chunksOn && looksDismembered;
 
                 Vector3 dir;
                 if (!_strikeDir.TryGetValue(__instance, out dir) || dir.sqrMagnitude < 0.001f)
@@ -3092,6 +3181,7 @@ namespace BloodSystem
                 float rayScale = damClass == Damage.DamageClass.Explosive ? 0.2f : 1f;
                 var shotList = BloodSystemPlugin.StartShotGroup();
                 BloodSystemPlugin.SpawnProjection(pos, dir, src, spd, realGib, shotList, rayScale);
+                // No follow target - this link is destroyed as part of the same call.
                 BloodSystemPlugin.SpawnBloodSpray(pos, dir, col, realGib, speedScale);
                 BloodSystemPlugin.SpawnBloodDrops(pos, dir, col, 10, shotList);
 
