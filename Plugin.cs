@@ -418,6 +418,9 @@ namespace BloodSystem
             }
             if (!ReferenceEquals(_hardCircleTex, null)) m.mainTexture = _hardCircleTex;
             else if (!ReferenceEquals(_decalTex, null)) m.mainTexture = _decalTex;
+            // Alloy reads _ColorRGBOpacityA, not _MainTex - without this the cloned source
+            // material's own albedo survives. See SetAllAlbedo.
+            SetAllAlbedo(m, m.mainTexture);
             // Set explicitly rather than relying on new Material(src) to carry override tags.
             m.SetOverrideTag("RenderType", "Transparent"); // see ApplyBloodProps
             _dripMatCache[key] = m;
@@ -1165,6 +1168,34 @@ namespace BloodSystem
         // Scan ALL renderers in scene for best Alloy transparent material.
         // Priority: Alloy/Core rq>2000 > other non-additive Alloy rq>2000 > Alloy/Core opaque.
         // Additive shaders excluded — additive blend on static mesh = glow, not blood.
+        // A renderer belonging to any kind of decal — bullet holes and the like. Matched by
+        // component and object name rather than a hard type reference so it also catches decal
+        // systems from other mods, which this assembly cannot reference at compile time.
+        static bool IsDecalRenderer(Renderer r)
+        {
+            Transform t = r.transform;
+            while (t != null)
+            {
+                string n = t.gameObject.name;
+                if (n.IndexOf("Decal", System.StringComparison.OrdinalIgnoreCase) >= 0
+                 || n.IndexOf("BulletHole", System.StringComparison.OrdinalIgnoreCase) >= 0
+                 || n.IndexOf("Bullet Hole", System.StringComparison.OrdinalIgnoreCase) >= 0)
+                    return true;
+
+                var comps = t.GetComponents<MonoBehaviour>();
+                for (int i = 0; i < comps.Length; i++)
+                {
+                    if (ReferenceEquals(comps[i], null)) continue;
+                    string cn = comps[i].GetType().Name;
+                    if (cn.IndexOf("Decal", System.StringComparison.OrdinalIgnoreCase) >= 0
+                     || cn.IndexOf("Hole", System.StringComparison.OrdinalIgnoreCase) >= 0)
+                        return true;
+                }
+                t = t.parent;
+            }
+            return false;
+        }
+
         internal static IEnumerator TryGrabAlloyFromScene()
         {
             _alloyGrabPending = true;
@@ -1184,6 +1215,15 @@ namespace BloodSystem
                     if (sn.IndexOf("Alloy", System.StringComparison.OrdinalIgnoreCase) < 0) continue;
                     // Exclude additive shaders: additive blend on mesh = glow, not blood.
                     if (sn.IndexOf("Additive", System.StringComparison.OrdinalIgnoreCase) >= 0) continue;
+
+                    // Never inherit from another decal. A bullet hole is Alloy/Core at renderQueue
+                    // 3000, so it scored the maximum 150 and won this scan outright - and its
+                    // albedo is a 2x2 atlas of bullet holes, which is where "every blood dot is
+                    // four bullet holes" came from. It only ever showed up on a fresh install,
+                    // since an existing alloy_mat.cache means this scan never runs at all, and the
+                    // cache stores just the shader name and blend state so a restart looked fine.
+                    if (IsDecalRenderer(r)) continue;
+
                     alloyCount++;
 
                     // Score: prefer Alloy/Core > other Alloy, prefer transparent (rq>2000) > opaque.
@@ -1269,8 +1309,27 @@ namespace BloodSystem
         // Blood = wet dielectric fluid. NOT metallic. NOT emissive.
         // Alloy property names from Josh015/Alloy source: _Metal, _Roughness, _Specularity, _EmissionColor.
         // NOT _Metallic, NOT _GlowColor, NOT _Emission, NOT _SpecColor, NOT _Shininess (those are Standard).
+        // Alloy shaders do NOT read _MainTex for albedo - they read _ColorRGBOpacityA. Material
+        // .mainTexture only ever writes _MainTex, so setting it left the SOURCE material's albedo
+        // in place and the blood decal drew whatever that material happened to carry. When the
+        // source was grabbed from a bullet-hole decal that albedo is a 2x2 atlas of bullet holes,
+        // and every blood dot rendered as four holes in the corners of its quad.
+        //
+        // Writing our own texture into every albedo slot the shader actually has makes the decal
+        // independent of whatever material it was cloned from, which is the real fix - the source
+        // material is only wanted for its shader and blend state, never its textures.
+        static readonly string[] ALBEDO_PROPS = { "_MainTex", "_ColorRGBOpacityA", "_BaseMap", "_BaseColorMap" };
+
+        static void SetAllAlbedo(Material m, Texture tex)
+        {
+            if (ReferenceEquals(tex, null)) return;
+            for (int i = 0; i < ALBEDO_PROPS.Length; i++)
+                if (m.HasProperty(ALBEDO_PROPS[i])) m.SetTexture(ALBEDO_PROPS[i], tex);
+        }
+
         static void ApplyBloodProps(Material m, Color col)
         {
+            SetAllAlbedo(m, m.mainTexture);
             if (m.HasProperty("_Color"))          m.SetColor("_Color",          col);
 
             // Alloy Core PBR — non-metallic, matte blood.
