@@ -1875,10 +1875,15 @@ namespace BloodSystem
         static IEnumerator DoTrailingSpray(Vector3 pos, Vector3 fwd, Color col, bool explode,
                                            float speedScale, float burstFraction, Transform follow)
         {
-            const int   SLICES  = 8;
-            const float SECONDS = 1f;
-            float wait = SECONDS / SLICES;
-            float share = 1f / SLICES;
+            const int   SLICES     = 8;
+            const float SECONDS    = 1f;
+            const float FRONT_LOAD = 0.45f;   // released instantly, so the hit still reads as a hit
+
+            float wait  = SECONDS / SLICES;
+            // Splitting the layers evenly across the second made them look like they had vanished:
+            // the totals were unchanged, but only an eighth of each was on screen at any moment.
+            // Most of the burst goes out at impact and the rest trails behind it.
+            float trail = (1f - FRONT_LOAD) / (SLICES - 1);
 
             for (int i = 0; i < SLICES; i++)
             {
@@ -1887,7 +1892,7 @@ namespace BloodSystem
 
                 SpraySprayImmediate(at, fwd, col, explode, speedScale, burstFraction,
                                     doFog: true, doPellet: true, doJet: false, doStain: false,
-                                    countScale: share);
+                                    countScale: (i == 0) ? FRONT_LOAD : trail);
                 yield return new WaitForSeconds(wait);
             }
         }
@@ -2635,6 +2640,9 @@ namespace BloodSystem
         public Sosig   PendingSrc;
         public Color   PendingCol;
         public Vector3 PendingEntryPt;
+        // The body part the bullet actually went through. PostMove only has the projectile, which
+        // is gone a moment later, so the trailing spray needs this to know what to follow.
+        public SosigLink PendingWoundLink;
         public bool    IsPlayerShot;
         public float   PendingBloodScale = 1f;
     }
@@ -2977,8 +2985,13 @@ namespace BloodSystem
 
                 var shotList = BloodSystemPlugin.StartShotGroup();
                 BloodSystemPlugin.SpawnProjection(exitPt, dir, src, spd, false, shotList, bloodScale);
-                BloodSystemPlugin.SpawnBloodSpray(exitPt, dir, col, false, 1f, bloodScale,
-                                                  __instance != null ? __instance.transform : null);
+                // Follow the WOUND, not the bullet. __instance here is the BallisticProjectile,
+                // which is destroyed almost immediately - passing its transform meant the trail
+                // lost its target at once and every slice fell back to the fixed impact point,
+                // leaving the spray hanging where the sosig used to be.
+                Transform woundT = (hasPending && tracker.PendingWoundLink != null)
+                                 ? tracker.PendingWoundLink.transform : null;
+                BloodSystemPlugin.SpawnBloodSpray(exitPt, dir, col, false, 1f, bloodScale, woundT);
                 BloodSystemPlugin.SpawnBloodDrops(exitPt,  dir, col, Mathf.Max(1, Mathf.RoundToInt(10 * bloodScale)), shotList);
                 BloodSystemPlugin.SpawnBloodDrops(entryPt, -dir, col, Mathf.Max(1, Mathf.RoundToInt(8 * bloodScale)), shotList);
             }
@@ -3109,6 +3122,7 @@ namespace BloodSystem
                 t.PendingSrc        = src;
                 t.PendingCol        = col;
                 t.PendingEntryPt    = d.point;
+                t.PendingWoundLink  = __instance;
                 t.PendingBloodScale = bloodScale;
             }
             catch (Exception ex)
