@@ -242,6 +242,14 @@ namespace BloodSystem
             // curve classes to split the splatter samples into.
             BloodThermal.Init();
 
+            // Disarm on every scene load. Thermal work only restarts once a thermal optic is
+            // actually looked through in the new scene, so a level with no thermal camera in it
+            // costs nothing at all.
+            UnityEngine.SceneManagement.SceneManager.sceneLoaded += (scene, mode) =>
+            {
+                BloodThermal.OnSceneChanged();
+            };
+
             // Soft-circle for splash dots, hard-circle for drip stains
             _decalTex      = MakeSoftCircle(96);
             _hardCircleTex = MakeHardCircle(64);

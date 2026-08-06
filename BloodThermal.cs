@@ -176,7 +176,6 @@ namespace BloodSystem
         static float _nextEvent = float.MaxValue;
 
         static bool _armed;
-        static bool _armLogged;
 
         // One reused block - MaterialPropertyBlock allocates, and the fallback path can touch
         // a lot of renderers in one step event.
@@ -671,15 +670,33 @@ namespace BloodSystem
         // Called from the Harmony postfix on PIPScope.ApplyCameraShader the first time any thermal
         // camera renders - scope optic or handheld thermal cam, both route through it. Until this
         // fires, not a single shader property is written.
+        // Every scene load disarms. Nothing thermal is done again until a thermal optic is
+        // actually looked through in the NEW scene.
+        //
+        // Arming used to be a one-way latch for the whole session: pick up a thermal scope once in
+        // one map and every later map kept paying for it - decal meshes split into eight density
+        // groups instead of one, and heat written on every cooling step - even with no thermal
+        // camera anywhere in the level. Scene changes also destroy every decal, so the cohorts
+        // left behind describe blood that no longer exists and only hold materials alive.
+        internal static void OnSceneChanged()
+        {
+            _armed = false;
+
+            // Their decals died with the old scene; drop the materials rather than wait out
+            // retirement timers against a world that is gone.
+            for (int i = _live.Count - 1; i >= 0; i--) Retire(_live[i]);
+            for (int i = _done.Count - 1; i >= 0; i--) Retire(_done[i]);
+            _live.Clear();
+            _done.Clear();
+            _cohorts.Clear();
+            _nextEvent = float.MaxValue;
+        }
+
         internal static void Arm()
         {
             if (_armed || !_enabled) return;
             _armed = true;
-            if (!_armLogged)
-            {
-                _armLogged = true;
-                BloodSystemPlugin.Log.LogInfo("[BloodSystem] Thermal armed - a thermal camera rendered, blood heat is now being applied.");
-            }
+            BloodSystemPlugin.Log.LogInfo("[BloodSystem] Thermal armed - a thermal camera rendered in this scene, blood heat is now being applied.");
             // Catch up everything that spawned while unarmed.
             for (int i = 0; i < _live.Count; i++) ApplyCohort(_live[i]);
             for (int i = 0; i < _done.Count; i++) ApplyCohort(_done[i]);
