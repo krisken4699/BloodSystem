@@ -74,7 +74,7 @@ namespace BloodSystem
         const float  COOL_SECONDS     = 8f;    // whole cooldown, fresh to surroundings
         const int    STEPS            = 80;    // shades on the way down, spaced evenly in temperature
         const float  COHORT_WINDOW    = 0.5f;  // blood within this long shares a schedule
-        const int    CLASSES          = 8;     // density groups; draw calls are ~10x this per shot
+        const int    CLASSES          = 4;     // density groups; chunks per shot are 10x this
         const float  FRAGMENT_WEIGHT  = 1f;    // how much scattered blood counts as thinner
         const bool   STAGGER          = true;  // groups cool in a wave, not as one block
         const bool   STAGGER_OUTWARD  = false; // dense middle leads the wave

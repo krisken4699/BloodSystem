@@ -1421,6 +1421,11 @@ namespace BloodSystem
                 mn.gravityModifier = 0.05f; // outer fog barely falls — less dense, less gravity
                 mn.loop            = false;
                 mn.playOnAwake     = false;
+                // World, not the Local default. These systems are repositioned between
+                // emissions, and in Local space that drags every particle already in the
+                // air along with the transform - the spray visibly jumped and flickered
+                // instead of staying where it came out.
+                mn.simulationSpace = ParticleSystemSimulationSpace.World;
                 mn.duration        = 0.5f;
                 mn.startColor      = new ParticleSystem.MinMaxGradient(_mustardFallback);
                 var em = _fogPS.emission;
@@ -1458,6 +1463,11 @@ namespace BloodSystem
                 mn.gravityModifier = 0.35f; // mid fog — moderate gravity
                 mn.loop            = false;
                 mn.playOnAwake     = false;
+                // World, not the Local default. These systems are repositioned between
+                // emissions, and in Local space that drags every particle already in the
+                // air along with the transform - the spray visibly jumped and flickered
+                // instead of staying where it came out.
+                mn.simulationSpace = ParticleSystemSimulationSpace.World;
                 mn.duration        = 0.5f;
                 mn.startColor      = new ParticleSystem.MinMaxGradient(_mustardFallback);
                 var em = _pelletPS.emission;
@@ -1495,6 +1505,11 @@ namespace BloodSystem
                 mn.gravityModifier = 1.2f; // inner dense drops — pulled down hard
                 mn.loop            = false;
                 mn.playOnAwake     = false;
+                // World, not the Local default. These systems are repositioned between
+                // emissions, and in Local space that drags every particle already in the
+                // air along with the transform - the spray visibly jumped and flickered
+                // instead of staying where it came out.
+                mn.simulationSpace = ParticleSystemSimulationSpace.World;
                 mn.duration        = 0.5f;
                 mn.startColor      = new ParticleSystem.MinMaxGradient(_mustardFallback);
                 var em = _jetPS.emission;
@@ -1850,7 +1865,14 @@ namespace BloodSystem
             // along its path instead of one puff hanging in the air behind it.
             if (!ReferenceEquals(_instance, null))
             {
-                _instance.StartCoroutine(DoTrailingSpray(pos, fwd, col, explode, speedScale, burstFraction, follow));
+                // A 360 burst means the part came apart, so there is nothing left to trail from -
+                // it stays put regardless of what the rest of the body does.
+                Transform trailTarget = explode ? null : follow;
+
+                _instance.StartCoroutine(DoTrailingSpray(pos, fwd, col, explode, speedScale, burstFraction,
+                                                         trailTarget, doFog: true, doPellet: false, seconds: 0.3f));
+                _instance.StartCoroutine(DoTrailingSpray(pos, fwd, col, explode, speedScale, burstFraction,
+                                                         trailTarget, doFog: false, doPellet: true, seconds: 1f));
                 SprayJetOnly(pos, fwd, col, explode, speedScale, burstFraction);
                 return;
             }
@@ -1873,25 +1895,28 @@ namespace BloodSystem
         // interleave their slices. Each slice still emits at a sensible place, but the layer
         // settings belong to whichever spray wrote them last.
         static IEnumerator DoTrailingSpray(Vector3 pos, Vector3 fwd, Color col, bool explode,
-                                           float speedScale, float burstFraction, Transform follow)
+                                           float speedScale, float burstFraction, Transform follow,
+                                           bool doFog, bool doPellet, float seconds)
         {
-            const int   SLICES     = 8;
-            const float SECONDS    = 1f;
-            const float FRONT_LOAD = 0.45f;   // released instantly, so the hit still reads as a hit
+            const int   SLICES     = 6;
+            const float FRONT_LOAD = 0.5f;   // released instantly, so the hit still reads as a hit
 
-            float wait  = SECONDS / SLICES;
-            // Splitting the layers evenly across the second made them look like they had vanished:
-            // the totals were unchanged, but only an eighth of each was on screen at any moment.
-            // Most of the burst goes out at impact and the rest trails behind it.
+            float wait  = seconds / SLICES;
+            // Splitting a layer evenly across its window made it look like it had vanished: the
+            // total was unchanged, but only a fraction was on screen at any moment. Most goes out
+            // at impact and the rest trails behind it.
             float trail = (1f - FRONT_LOAD) / (SLICES - 1);
 
             for (int i = 0; i < SLICES; i++)
             {
+                // Only the emission POINT moves. The systems simulate in world space, so blood
+                // already in the air stays where it came out - a later slice simply starts from
+                // wherever the wound has got to, which is what draws the trail.
                 Vector3 at = pos;
                 if (follow != null) at = follow.position;   // Unity null: destroyed link falls back
 
                 SpraySprayImmediate(at, fwd, col, explode, speedScale, burstFraction,
-                                    doFog: true, doPellet: true, doJet: false, doStain: false,
+                                    doFog: doFog, doPellet: doPellet, doJet: false, doStain: false,
                                     countScale: (i == 0) ? FRONT_LOAD : trail);
                 yield return new WaitForSeconds(wait);
             }
@@ -2369,19 +2394,11 @@ namespace BloodSystem
             // existed rather than eight times it.
             int classes = BloodThermal.Enabled ? BloodThermal.ActiveClasses : 1;
 
-            // Chunks are the product of the two axes, and the product is what costs frames - one
-            // GameObject, mesh, renderer and material each. Ten brightness levels times eight
-            // classes is eighty chunks a shot, and with twenty shot groups retained that is 1600
-            // renderers. Cap the product instead of either axis: with one class the full ten
-            // levels are used exactly as before, and as classes rise the brightness levels thin
-            // out to hold the total near the budget. Brightness only spans 0.7-1.0, so dropping
-            // from ten shades to five is close to invisible, while the classes are the axis that
-            // actually does something on thermal.
-            const int CHUNK_BUDGET = 40;
-            int levelCount = Mathf.Clamp(CHUNK_BUDGET / Mathf.Max(1, classes), 3, BRIGHT_LEVELS.Length);
-            var levels = new float[levelCount];
-            for (int i = 0; i < levelCount; i++)
-                levels[i] = BRIGHT_LEVELS[Mathf.RoundToInt((float)i / (levelCount - 1) * (BRIGHT_LEVELS.Length - 1))];
+            // All ten brightness levels, always. Thinning them to hold a chunk budget was the
+            // wrong axis to spend: per-dot brightness variation is what stops splatter looking
+            // flat, and halving it was immediately visible. The chunk count is controlled by the
+            // density class count instead, which is the axis that only matters on thermal.
+            float[] levels = BRIGHT_LEVELS;
 
             var buckets = new List<int>[levels.Length * classes];
             for (int i = 0; i < buckets.Length; i++) buckets[i] = new List<int>();
